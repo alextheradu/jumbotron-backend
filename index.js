@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json());
 app.use(cors({
     origin: [
-        "https://cuddly-space-waffle-jjv54wrjpjxvfqj55-5173.app.github.dev",
+        "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev/",
         "https://jumbotron.hackclub.com"
     ],
     methods: [
@@ -20,14 +20,19 @@ app.use(cors({
     credentials: true
 }))
 
+let sessions = [];
+
+/*
 let validCitiesCache = [];
 let pocEmailsCache = [];
 
 let events = [];
 let sessions = [];
+*/
 
 let clientID = "e86d4d7eec9c546e6c4700388d4fea7f";
 
+/*
 async function cacheCities() {
     try {
         //const rawData = await fetch("https://raw.githubusercontent.com/lynn89-eefje/jumbotron-events/refs/heads/main/data.json");
@@ -40,6 +45,9 @@ async function cacheCities() {
         console.error("Failed to cache cities: ", err);
     }
 }
+    */
+
+/*
 
 function checkCity(cityName) {
     return validCitiesCache.includes(cityName);
@@ -73,6 +81,8 @@ function ensureEvent(eventName) {
     ];
 }
 
+*/
+
 function timeDiff(timestamp) {
     if (timestamp == null) {
         return true;
@@ -86,34 +96,6 @@ function timeDiff(timestamp) {
     }
     return false;
 }
-
-function cleanUp() {
-    /*
-    If not active and there are no streams, we remove the city
-    If not active but there are streams, we set it to inactive and remove wasted data
-    */
-    let toRemove = [];
-    for (let i in events) {
-        if (streams[events[i].name] == null || streams[events[i].name].length == 0) {
-            if (events[i].liveshareData.active == false || timeDiff(events[i].liveshareData.timestamp) == true) {
-                console.log(`Removing ${events[i].name} to clear memory`)
-                toRemove.push(events[i].name);
-            }
-        }
-        else {
-            if (events[i].liveshareData.active == false && timeDiff(events[i].liveshareData.timestamp) == true) {
-                console.log(`Deactivating ${events[i].name} to clear memory`)
-                events[i].liveshareData = {
-                    "active": false,
-                    "timestamp": Date.getTime()
-                }
-            }
-        }
-    }
-    events = events.filter(e => toRemove.indexOf(e.name) == -1);
-}
-
-setInterval(cleanUp, 1000*60*15);
 
 
 async function sendDataToSlack() {
@@ -165,7 +147,97 @@ async function sendDataToSlack() {
     }
 }
 
+let codes = [];
+let tokens = [];
+
+function codeGen(token) {
+    tokens.push(token);
+    let code = randomGen()
+    codes.push(code);
+    return code;
+}
+
+function randomGen() {
+    let code = "";
+    for (let i = 0; i <= 3; i++) {
+        code += Math.floor(Math.random()*10);
+    }
+    if (codes.indexOf(code) == -1) {
+        return code;
+    }
+    else {
+        return randomGen();
+    }
+}
+
 // --- Express Routes ---
+
+app.post("/genToken", async function(req, res) {
+    const { code } = req.body;
+    if (!code) {
+        return res.status(400).json({ error: "Missing code"});
+    } 
+    let reqBody = {
+            "client_id": clientID,
+            "client_secret": process.env.CLIENT_SECRET,
+            "redirect_uri": "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev/callback",
+            "code": code,
+            "grant_type": "authorization_code"
+        }
+    const response = await fetch("https://auth.hackclub.com/oauth/token", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: reqBody
+    })
+    if (!response.ok) {
+        return res.status(401).json({ error: "Initial auth request failed" });
+    }
+    const data = await response.json();
+    let token = data.access_token;
+
+    const response2 = await fetch("https://auth.hackclub.com/api/v1/me", {
+        method: "GET",
+        headers: {
+            Authorization: `Bearer ${data.access_token}`,
+            "Content-Type": "application/json"
+        }
+    })
+    if (!response2.ok) {
+        return res.status(401).json({ error: "Information request failed" });
+    }
+    const scopes = await response2.json();
+    if (!scopes.ysws_eligible || scopes.verification_status != "verified") {
+        return res.status(401).json({ error: "User is not eligible" });
+    }
+
+    let newToken = {};
+    newToken.name = scopes.first_name;
+    newToken.slack = scopes.slack_id;
+    const jumbotronCode = await codeGen(newToken);
+    return res.status(200).json({credentials: [jumbotronCode, newToken.slack, newToken.name]});
+});
+
+app.post("initEvent", async function (req, res) {
+    const { slack, code, cityName } = req.body;
+    if (!slack || !code || !cityName) {
+        return res.status(400).json({ error: "Missing parameter(s)"});
+    }
+    let index = codes.indexOf(code);
+    if (index == -1) {
+        return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
+    }
+    let token = tokens[index];
+    if (token.slack != slack) {
+        return res.status(401).json({error: "Invalid Jumbotron token aspect"});
+    }
+
+    tokens[index].cityName = cityName;
+    return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
+})
+
+/*
 app.get(`/data`, async function(req, res) {
     const { eventName } = req.query;
     if (!eventName) {
@@ -185,186 +257,6 @@ app.get(`/data`, async function(req, res) {
     }
 });
 
-app.get("/acceptedEmails", async (req, res) => {
-    let {authKey, cityName} = req.query;
-    if (!authKey || authKey !== masterKey || !cityName) {
-        return res.status(400).json({ error: "Missing parameter or invalid auth query parameter" });
-    }
-    
-    const response = ensureEvent(cityName); // No longer needs await
-    if (!response) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    const [ acceptName, acceptedEmails, rawData ] = response;
-    res.status(200).json({data: acceptedEmails});
-});
-
-app.post("/addEmail", async (req, res) => {
-    let {authKey, cityName, emailAddress} = req.body;
-    if (!authKey || !cityName || !emailAddress) {
-        return res.status(400).json({error: "Missing parameter(s)"});
-    }
-    if (authKey !== masterKey) {
-        return res.status(401).json({error: "Invalid auth query parameter"});
-    }
-    let details = ensureEvent(cityName);
-    if (!details) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    for (let i = 0; i < events.length; i++) {
-        if (events[i].name === cityName) {
-            if (events[i].acceptedEmails.indexOf(emailAddress) === -1) {
-                events[i].acceptedEmails.push(emailAddress);
-                return res.status(200).json({message: "Added email"});
-            }
-            else {
-                return res.status(400).json({error: "Email is already on the list"});
-            }
-        }
-    }
-    
-})
-
-app.post("/removeEmail", async (req, res) => {
-    let {authKey, cityName, emailAddress} = req.body;
-    if (!authKey || !cityName || !emailAddress) {
-        return res.status(400).json({error: "Missing parameter(s)"});
-    }
-    if (authKey !== masterKey) {
-        return res.status(401).json({error: "Invalid auth query parameter"});
-    }
-    let details = ensureEvent(cityName);
-    if (!details) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    for (let i = 0; i < events.length; i++) {
-        if (events[i].name === cityName) {
-            if (events[i].acceptedEmails.indexOf(emailAddress) !== -1) {
-                events[i].acceptedEmails = events[i].acceptedEmails.filter(e => e !== emailAddress);
-                return res.status(200).json({message: "Removed email"});
-            }
-            else {
-                return res.status(400).json({error: "Email is not on the list"});
-            }
-        }
-    }
-})
-app.use(["/mutate", "/terminateLiveshare"], express.text({ type: ["text/plain", "*/*"] }), (req, res, next) => {
-    if (typeof req.body === "string" && req.body.trim().startsWith("{")) {
-        try {
-            req.body = JSON.parse(req.body);
-        } catch (err) {
-            console.error("Failed to parse plain-text JSON beacon:", err);
-        }
-    }
-    // Ensure req.body is at least an object if parsing didn't occur
-    req.body = req.body || {};
-    next();
-});
-app.post("/wipeSessions", async (req, res) => {
-    let {authKey} = req.body;
-    if (!authKey || authKey !== masterKey) {
-        return res.status(401).json({error: "Not allowed"});
-    }
-    sessions = [];
-    sendDataToSlack();
-    return res.status(200).json({message: "All sessions have been wiped"});
-});
-app.post("/mutate", async (req, res) => {
-    let {auth, cityName, data} = req.body;
-    if (!auth || !cityName || !data) {
-        return res.status(400).json({error: "Missing parameter(s)"});
-    }
-    let response = ensureEvent(cityName);
-    if (!response) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    if (auth !== masterKey) {
-        if (!auth.emailAddress || !auth.key) {
-            return res.status(400).json({error: "Invalid auth parameter"});
-        }
-        console.log(`/mutate by ${auth.emailAddress}`);
-        const [name, acceptedEmails] = response;
-        if (acceptedEmails.indexOf(auth.emailAddress) === -1) {
-            return res.status(400).json({error: "Invalid email"});
-        }
-        let validSet = sessions.find(e => e.key === auth.key && e.cityName === cityName);
-        if (!validSet) {
-            return res.status(401).json({error: "Invalid authentication"});
-        }
-        if (validSet.emailAddress !== auth.emailAddress) {
-            return res.status(401).json({error: "Invalid authentication"});
-        }
-    }
-    for (let i = 0; i < events.length; i++) {
-        if (events[i].name === cityName) {
-            events[i].liveshareData = data;
-            broadcastToCity(cityName, data);
-            return res.status(200).json({message: "Changed liveshare data"});
-        }
-    }
-})
-
-app.post("/terminateLiveshare", async (req, res) => {
-    let {emailAddress, key, cityName} = req.body;
-    if (!emailAddress || !key || !cityName) {
-        return res.status(400).json({error: "Missing parameter(s)"});
-    }
-    if (ensureEvent(cityName) === false) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    let valid = events.find(e => e.acceptedEmails.indexOf(emailAddress) != -1 && e.name === cityName);
-    if (!valid) {
-        return res.status(401).json({error: "Email address is not added to this event"});
-    }
-    let valid2 = sessions.find(e => e.emailAddress === emailAddress && e.key === key);
-    if (!valid2) {
-        return res.status(401).json({error: "Invalid credential"});
-    }
-    let index = events.findIndex(e => e.name == cityName);
-    if (index === -1) {
-        return res.status(500).json({error: "Index mismatch"});
-    }
-    events[index].liveshareData = {active: false};
-    broadcastToCity(cityName, {active: false});
-    return res.status(200).json({message: "Success"});
-})
-
-app.post("/masterOverride", async (req, res) => {
-    let {authKey, eventsNew, sessionsNew} = req.body;
-    if (!authKey || !eventsNew || !sessionsNew) {
-        return res.status(400).json({error: "Missing parameter(s)"});
-    }
-    if (authKey !== masterKey) {
-        return res.status(401).json({error: "Invalid auth query parameter"});
-    }
-
-    cacheCities();
-
-    events = eventsNew;
-    sessions = sessionsNew;
-
-    sendDataToSlack();
-    return res.status(200).json({ message: "Override successful and state backup triggered." });
-});
-
-app.post("/forceCache", async (req, res) => {
-    let {authKey} = req.body;
-    if (authKey === masterKey) {
-        cacheCities();
-        return res.status(200).json({message: "Cached"});
-    }
-    return res.status(401).json({error: "Missing or invalid parameter"});
-})
-
-app.post("/genBackup", async (req, res) => {
-    let {authKey} = req.body;
-    if (authKey !== masterKey) {
-        return res.status(400).json({error: "Invalid auth"});
-    }
-    sendDataToSlack();
-    return res.status(200).json({message: "Sent through Slack"});
-})
 
 app.post("/createSession", async (req, res) => {
     let {code, cityName} = req.body;
