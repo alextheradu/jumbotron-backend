@@ -192,7 +192,7 @@ app.post("/genToken", async function(req, res) {
 });
 
 
-app.post("initEvent", async function (req, res) {
+app.post("/initEvent", async function (req, res) {
     const { slack, password, cityName } = req.body;
     if (!slack || !password || !cityName) {
         return res.status(400).json({ error: "Missing parameter(s)"});
