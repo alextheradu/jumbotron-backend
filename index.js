@@ -200,7 +200,7 @@ app.post("/genToken", async function(req, res) {
         headers: {
             "Content-Type": "application/json"
         },
-        body: reqBody
+        body: JSON.stringify(reqBody)
     })
     if (!response.ok) {
         return res.status(401).json({ error: "Initial auth request failed" });
