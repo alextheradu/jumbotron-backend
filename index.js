@@ -173,6 +173,10 @@ function randomGen() {
     }
 }
 
+function tokenLog(slack, name) {
+    return slack + "~" + name;
+}
+
 // ONLY FOR DEV //
 let redirectOptions = ["https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev", "https://jumbotron.hackclub.com"]
 let redirect = redirectOptions[0]
@@ -224,8 +228,10 @@ app.post("/genToken", async function(req, res) {
     newToken.name = scopes.first_name;
     newToken.slack = scopes.slack_id;
     const jumbotronCode = await codeGen(newToken);
+    console.log(tokenLog(newToken.slack, newToken.name), `Generated new code ${jumbotronCode}`)
     return res.status(200).json({credentials: [jumbotronCode, newToken.slack, newToken.name]});
 });
+
 
 app.post("initEvent", async function (req, res) {
     const { slack, code, cityName } = req.body;
@@ -242,6 +248,7 @@ app.post("initEvent", async function (req, res) {
     }
 
     tokens[index].cityName = cityName;
+    console.log(tokenLog(slack, tokens[index].name), `Set ${cityName} as location visible`)
     return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
 })
 
