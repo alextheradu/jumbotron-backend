@@ -21,67 +21,8 @@ app.use(cors({
 }))
 
 let sessions = [];
-
-/*
-let validCitiesCache = [];
-let pocEmailsCache = [];
-
-let events = [];
-let sessions = [];
-*/
-
 let clientID = "e86d4d7eec9c546e6c4700388d4fea7f";
 
-/*
-async function cacheCities() {
-    try {
-        //const rawData = await fetch("https://raw.githubusercontent.com/lynn89-eefje/jumbotron-events/refs/heads/main/data.json");
-        //const data = await rawData.json();
-        let data = process.env.REF.split("*");
-        validCitiesCache = data.map(event => event.split(";")[0]);
-        pocEmailsCache = data.map(event => event.split(";")[1].split(","))
-        console.log("Cached events");
-    } catch(err) {
-        console.error("Failed to cache cities: ", err);
-    }
-}
-    */
-
-/*
-
-function checkCity(cityName) {
-    return validCitiesCache.includes(cityName);
-}
-
-// Synchronous now, as it just looks up and pushes to a local array
-function ensureEvent(eventName) {
-    if (!checkCity(eventName)) {
-        return false;
-    }
-    
-    // Find event in our local list
-    let event = events.find(e => e.name === eventName);
-
-    // If it doesn't exist, create it and push it to the list
-    let clock = new Date();
-    if (!event) {
-        event = { 
-            name: eventName, 
-            acceptedEmails: pocEmailsCache[validCitiesCache.indexOf(eventName)],
-            liveshareData: {
-                active: false,
-                timestamp: clock.getTime()
-            } 
-        };
-        events.push(event);
-    }
-
-    return [
-        event.name, event.acceptedEmails, event.liveshareData
-    ];
-}
-
-*/
 
 /*
 function timeDiff(timestamp) {
@@ -149,13 +90,13 @@ function timeDiff(timestamp) {
     }
 }*/
 
-let codes = [];
+let logins = [];
 let tokens = [];
 
 function codeGen(token) {
     tokens.push(token);
     let code = randomGen()
-    codes.push(code);
+    //codes.push(code);
     return code;
 }
 
@@ -164,21 +105,24 @@ function randomGen() {
     for (let i = 0; i <= 3; i++) {
         code += Math.floor(Math.random()*10);
     }
+    /*
     if (codes.indexOf(code) == -1) {
         return code;
     }
     else {
         return randomGen();
-    }
+    }*/
+   for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].code == code) {
+            return randomGen();
+        }
+   }
+   return code;
 }
 
 function tokenLog(slack, name) {
     return slack + "~" + name;
 }
-
-// ONLY FOR DEV //
-let redirectOptions = ["https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev", "https://jumbotron.hackclub.com"]
-let redirect = redirectOptions[0]
 
 // --- Express Routes ---
 
@@ -207,7 +151,6 @@ app.post("/genToken", async function(req, res) {
         return res.status(401).json({ error: "Initial auth request failed" });
     }
     const data = await response.json();
-    let token = data.access_token;
 
     const response2 = await fetch("https://auth.hackclub.com/api/v1/me", {
         method: "GET",
@@ -228,25 +171,38 @@ app.post("/genToken", async function(req, res) {
 
     for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].slack == scopes.slack_id) {
-            return res.status(200).json({credentials: [codes[i], tokens[i].slack, tokens[i].name]});
+            return res.status(200).json({credentials: [tokens[i].code, tokens[i].slack, tokens[i].name, tokens[i].password]});
         }
+    }
+
+    const randarray = new Uint8Array(16);
+    crypto.getRandomValues(randarray);
+    let cryptoCode = "";
+    for (let i = 0; i < randarray.length; i++) {
+        cryptoCode += "" + randarray[i]
     }
 
     let newToken = {};
     newToken.name = scopes.first_name;
     newToken.slack = scopes.slack_id;
+    newToken.password = cryptoCode;
     const jumbotronCode = await codeGen(newToken);
     console.log(tokenLog(newToken.slack, newToken.name), `Generated new code ${jumbotronCode}`)
-    return res.status(200).json({credentials: [jumbotronCode, newToken.slack, newToken.name]});
+    return res.status(200).json({credentials: [jumbotronCode, newToken.slack, newToken.name, newToken.password]});
 });
 
 
 app.post("initEvent", async function (req, res) {
-    const { slack, code, cityName } = req.body;
-    if (!slack || !code || !cityName) {
+    const { slack, password, cityName } = req.body;
+    if (!slack || !password || !cityName) {
         return res.status(400).json({ error: "Missing parameter(s)"});
     }
-    let index = codes.indexOf(code);
+    let index = -1
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].code == password) {
+            index = i;
+        }
+    }
     if (index == -1) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
     }
