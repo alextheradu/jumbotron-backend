@@ -11,7 +11,8 @@ app.use(express.json());
 app.use(cors({
     origin: [
         "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev/",
-        "https://jumbotron.hackclub.com"
+        "https://jumbotron.hackclub.com",
+        "https://api.jumbotron.hackclub.com"
     ],
     methods: [
         "POST", "GET"
@@ -83,6 +84,7 @@ function ensureEvent(eventName) {
 
 */
 
+/*
 function timeDiff(timestamp) {
     if (timestamp == null) {
         return true;
@@ -96,9 +98,10 @@ function timeDiff(timestamp) {
     }
     return false;
 }
+    */
 
 
-async function sendDataToSlack() {
+/*async function sendDataToSlack() {
     const slackToken = process.env.BOT_TOKEN;
     const channelId = process.env.CHANNEL_ID;
 
@@ -145,7 +148,7 @@ async function sendDataToSlack() {
     } catch (err) {
         console.error("Failed to post JSON backup to Slack:", err);
     }
-}
+}*/
 
 let codes = [];
 let tokens = [];
@@ -170,7 +173,12 @@ function randomGen() {
     }
 }
 
+// ONLY FOR DEV //
+let redirectOptions = ["https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev", "https://jumbotron.hackclub.com"]
+let redirect = redirectOptions[0]
+
 // --- Express Routes ---
+
 
 app.post("/genToken", async function(req, res) {
     const { code } = req.body;
@@ -180,7 +188,7 @@ app.post("/genToken", async function(req, res) {
     let reqBody = {
             "client_id": clientID,
             "client_secret": process.env.CLIENT_SECRET,
-            "redirect_uri": "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev/callback",
+            "redirect_uri": `${redirectOptions}/callback`,
             "code": code,
             "grant_type": "authorization_code"
         }
@@ -362,12 +370,13 @@ function broadcastToCity(cityName, data) {
 // --- Server Startup ---
 await cacheCities();
 //await sendDataToSlack();
-const port = process.env.PORT || 3000; 
 
 /*setInterval(async () => {
     await sendDataToSlack();
     //await cacheCities();
 }, 30*1000*60)*/
+
+const port = process.env.PORT || 3000; 
 
 app.listen(port, function() {
     console.log(`Jumbotron running on port ${port}`);
