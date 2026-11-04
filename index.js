@@ -10,9 +10,8 @@ const app = express();
 app.use(express.json());
 app.use(cors({
     origin: [
-        "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev/",
-        "https://jumbotron.hackclub.com",
-        "https://api.jumbotron.hackclub.com"
+        "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev",
+        "https://jumbotron.hackclub.com"
     ],
     methods: [
         "POST", "GET"
@@ -192,7 +191,7 @@ app.post("/genToken", async function(req, res) {
     let reqBody = {
             "client_id": clientID,
             "client_secret": process.env.CLIENT_SECRET,
-            "redirect_uri": `${redirectOptions}/callback`,
+            "redirect_uri": process.env.REDIRECT,
             "code": code,
             "grant_type": "authorization_code"
         }
