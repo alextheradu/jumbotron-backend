@@ -221,7 +221,8 @@ app.post("/genToken", async function(req, res) {
         return res.status(401).json({ error: "Information request failed" });
     }
 
-    const scopes = await response2.json().identity;
+    const prescopes = await response2.json();
+    const scopes = prescopes.identity;
     if (!scopes.ysws_eligible || scopes.verification_status != "verified") {
         return res.status(401).json({ error: "User is not eligible" });
     }
