@@ -187,7 +187,8 @@ app.post("/genToken", async function(req, res) {
     const { code } = req.body;
     if (!code) {
         return res.status(400).json({ error: "Missing code"});
-    } 
+    }
+
     let reqBody = {
             "client_id": clientID,
             "client_secret": process.env.CLIENT_SECRET,
@@ -219,9 +220,16 @@ app.post("/genToken", async function(req, res) {
     if (!response2.ok) {
         return res.status(401).json({ error: "Information request failed" });
     }
-    const scopes = await response2.json();
+
+    const scopes = await response2.json().identity;
     if (!scopes.ysws_eligible || scopes.verification_status != "verified") {
         return res.status(401).json({ error: "User is not eligible" });
+    }
+
+    for (let i = 0; i < tokens.length; i++) {
+        if (token[i].slack == scopes.slack_id) {
+            return res.status(200).json({credentials: [codes[i], tokens[i].slack, tokens[i].name]});
+        }
     }
 
     let newToken = {};
