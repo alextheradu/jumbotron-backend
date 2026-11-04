@@ -204,7 +204,6 @@ app.post("/genToken", async function(req, res) {
         body: JSON.stringify(reqBody)
     })
     if (!response.ok) {
-        console.log(response); // DEV
         return res.status(401).json({ error: "Initial auth request failed" });
     }
     const data = await response.json();
@@ -228,7 +227,7 @@ app.post("/genToken", async function(req, res) {
     }
 
     for (let i = 0; i < tokens.length; i++) {
-        if (token[i].slack == scopes.slack_id) {
+        if (tokens[i].slack == scopes.slack_id) {
             return res.status(200).json({credentials: [codes[i], tokens[i].slack, tokens[i].name]});
         }
     }
