@@ -257,7 +257,7 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
     }
     let token = tokens[index];
-    if (token.slack != slack) {
+    if (token.code != code) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"});
     }
 
