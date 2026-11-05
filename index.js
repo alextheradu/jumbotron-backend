@@ -199,7 +199,7 @@ app.post("/initEvent", async function (req, res) {
     }
     let index = -1
     for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].code == password) {
+        if (tokens[i].password == password) {
             index = i;
         }
     }
