@@ -262,6 +262,7 @@ app.post("/sendPacket", async function (req, res) {
     }
 
     packets[code] = packet;
+    console.log(tokenLog(tokens[index].slack, tokens[index].name), `Updated information based on ${packet}`);
     return res.status(200).json({message: `Updated information based on ${packet}`});
 })
 
