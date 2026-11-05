@@ -91,12 +91,15 @@ function timeDiff(timestamp) {
 }*/
 
 let tokens = [];
+let packets = {};
 
 function codeGen(token) {
     let code = randomGen()
     let tokenPush = token;
+    
     tokenPush.code = code;
-    tokens.push(token);
+    tokens.push(tokenPush);
+    packets[tokenPush.code] = "";
     //codes.push(code);
     return code;
 }
@@ -231,143 +234,46 @@ app.get("/getLocation", async function (req, res) {
             else {
                 return res.status(200).json({name: tokens[i].cityName});
             }
-        }
+        } 
         else {
             return res.status(400).json({error: "No event found"});
         }
     }
 })
 
-/*
-app.get(`/data`, async function(req, res) {
-    const { eventName } = req.query;
-    if (!eventName) {
-        return res.status(400).json({ error: "Missing eventName query parameter" });
-    }
-
-    try {
-        const response = ensureEvent(eventName);
-        if (response === false) {
-            return res.status(404).json({ error: "Invalid eventName value; did not find event" });
-        }
-
-        const [name, acceptedEmails, liveshareData] = response;
-        res.status(200).json({ data: liveshareData });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
-    }
-});
-
-
-app.post("/createSession", async (req, res) => {
-    let {code, cityName} = req.body;
-    if (!code || !cityName) {
+app.post("/sendPacket", async function (req, res) {
+    const { code, password, packet } = req.body;
+    if (!code || !password || !packet) {
         return res.status(400).json({error: "Missing parameter(s)"});
     }
-    let cityExists = ensureEvent(cityName);
-    if (!cityExists) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-    const response = await fetch("https://auth.hackclub.com/oauth/token", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            client_id: clientID,
-            client_secret: process.env.CLIENT_SECRET,
-            redirect_uri: process.env.REDIRECT,
-            code: code,
-            grant_type: "authorization_code"
-        })
-    });
 
-    const data = await response.json();
-    if (!response.ok) {
-        return res.status(400).json({ error: "OAuth exchange failed", details: data });
-    }
-
-    // https://auth.hackclub.com/api/v1/me
-
-    const getInfo = await fetch("https://auth.hackclub.com/api/v1/me", {
-        method: "GET",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${data.access_token}`
-        },
-
-    })
-    const data2 = await getInfo.json();
-    //console.log("New session validated for ", data2.identity.primary_email);
-    if (data2.identity.verification_status === "ineligible") {
-        return res.status(401).json({error: "User must be YSWS eligible"});
-    }
-    let [eventName, acceptedEmails, liveshareData] = cityExists;
-    if (acceptedEmails.indexOf(data2.identity.primary_email) == -1) {
-        return res.status(401).json({error: "Email is not accepted for this event: must be added using /addEmail"});
-    }
-
-    const generateKey = () => {return crypto.randomBytes(32).toString("hex")}
-    const key = generateKey();
-    sessions = sessions.filter(e => e.emailAddress !== data2.identity.primary_email);
-    sessions.push({
-        emailAddress: data2.identity.primary_email,
-        cityName: cityName,
-        key: key
-    })
-    console.log(`Created new login session for ${data2.identity.primary_email}, ${cityName}`)
-    //console.log("New session validated for ", data2.identity.primary_email);
-    return res.status(200).json({emailAddress: data2.identity.primary_email, key: key});
-})
-
-let streams = {};
-app.get("/stream", (req, res) => {
-    let {cityName} = req.query;
-    if (!cityName) {
-        return res.status(400).json({error: "Missing cityName"});
-    }
-    if (ensureEvent(cityName) === false) {
-        return res.status(400).json({error: "Invalid cityName"});
-    }
-
-
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    })
-
-    res.write(`data: ${JSON.stringify({message: "Connected to stream"})}\n\n`);
-
-    if (streams[cityName] == null ) {
-        streams[cityName] = [];
-    }
-    streams[cityName].push(res)
-
-    req.on("close", () => {
-        streams[cityName] = streams[cityName].filter(e => e !== res);
-        if (streams[cityName] && streams[cityName].length === 0) {
-            delete streams[cityName];
+    let index = -1
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].password == password) {
+            index = i;
         }
-    })
+    }
+    if (index == -1) {
+        return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
+    }
+    let token = tokens[index];
+    if (token.slack != slack) {
+        return res.status(401).json({error: "Invalid Jumbotron token aspect"});
+    }
+
+    packets[code] = packet;
+    return res.status(200).json({message: `Updated information based on ${packet}`});
 })
 
-function broadcastToCity(cityName, data) {
-    if (streams[cityName]) {
-        let message = `data: ${JSON.stringify(data)}\n\n`; // \n\n is required
-        streams[cityName].forEach(e => e.write(message));
-    } 
-}
+app.get("/getPacket", async function (req, res) {
+    const { code } = req.query;
+    if (!code) {
+        return res.status(400).json({error: "Missing event code"});
+    }
 
-
-// --- Server Startup ---
-await cacheCities();
-//await sendDataToSlack();
-
-/*setInterval(async () => {
-    await sendDataToSlack();
-    //await cacheCities();
-}, 30*1000*60)*/
+    let packet = packets[code];
+    return res.status(200).json({data: packet});
+})
 
 const port = process.env.PORT || 3000; 
 
