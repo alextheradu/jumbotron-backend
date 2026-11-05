@@ -90,12 +90,13 @@ function timeDiff(timestamp) {
     }
 }*/
 
-let logins = [];
 let tokens = [];
 
 function codeGen(token) {
-    tokens.push(token);
     let code = randomGen()
+    let tokenPush = token;
+    tokenPush.code = code;
+    tokens.push(token);
     //codes.push(code);
     return code;
 }
