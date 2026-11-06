@@ -239,6 +239,9 @@ app.get("/getPacket", async function (req, res) {
 
     let packet = packets[code];
     if (!packet) {
+        if (tokens[code]) {
+            return res.status(200).json({data: null, cityName: tokens[code].cityName});
+        }
         return res.status(400).json({error: "No event found"});
     }
     return res.status(200).json({data: packet, cityName: tokens[code].cityName});
