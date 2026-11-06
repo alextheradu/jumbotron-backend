@@ -239,9 +239,9 @@ app.get("/getPacket", async function (req, res) {
 
     let packet = packets[code];
     if (!packet) {
-        return res.status(200)
+        return res.status(200).json({data: null, cityName: tokens[code].cityName});
     }
-    return res.status(200).json({data: null, cityName: tokens[code].cityName});
+    return res.status(200).json({data: packet, cityName: tokens[code].cityName});
 })
 
 const port = process.env.PORT || 3000; 
