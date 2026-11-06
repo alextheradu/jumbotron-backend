@@ -215,28 +215,6 @@ app.post("/initEvent", async function (req, res) {
     return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
 })
 
-/*
-app.get("/getLocation", async function (req, res) {
-    const { code } = req.query;
-    if (!code) {
-        return res.status(400).json({error: "No event code"});
-    }
-
-    for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].code == code) {
-            if (!tokens[i].cityName) {
-                return res.status(200).json({name: "None"});
-            }
-            else {
-                return res.status(200).json({name: tokens[i].cityName});
-            }
-        } 
-        else {
-            return res.status(400).json({error: "No event found"});
-        }
-    }
-})
-    */
 
 app.post("/sendPacket", async function (req, res) {
     const { code, password, packet } = req.body;
@@ -260,7 +238,10 @@ app.get("/getPacket", async function (req, res) {
     }
 
     let packet = packets[code];
-    return res.status(200).json({data: packet});
+    if (!packet) {
+        return res.status(200)
+    }
+    return res.status(200).json({data: null, cityName: tokens[code].cityName});
 })
 
 const port = process.env.PORT || 3000; 
