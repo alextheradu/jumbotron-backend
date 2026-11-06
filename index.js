@@ -20,7 +20,6 @@ app.use(cors({
     credentials: true
 }))
 
-let sessions = [];
 let clientID = "e86d4d7eec9c546e6c4700388d4fea7f";
 
 
@@ -90,17 +89,13 @@ function timeDiff(timestamp) {
     }
 }*/
 
-let tokens = [];
+let tokens = {};
 let packets = {};
 
 function codeGen(token) {
     let code = randomGen()
-    let tokenPush = token;
-    
-    tokenPush.code = code;
-    tokens.push(tokenPush);
-    packets[tokenPush.code] = "";
-    //codes.push(code);
+    tokens[code] = token;
+    packets[code] = "";
     return code;
 }
 
@@ -116,10 +111,8 @@ function randomGen() {
     else {
         return randomGen();
     }*/
-   for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].code == code) {
-            return randomGen();
-        }
+   if (tokens[code]) {
+    return randomGen();
    }
    return code;
 }
@@ -173,11 +166,23 @@ app.post("/genToken", async function(req, res) {
         return res.status(401).json({ error: "User is not eligible" });
     }
 
+    if (true) { // keeps variables sub-local
+        let expanded = Object.values(tokens);
+        let index = expanded.findIndex((e) => {
+            return e.slack == scopes.slack_id;
+        })
+        if (index != -1) {
+            let expanded2 = Object.entries(tokens);
+            return res.status(200).json({credentials: [expanded2[index][0], scopes.slack_id, scopes.first_name, tokens[expanded2[index][0]].password]})
+        }
+    }
+    /*
     for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].slack == scopes.slack_id) {
             return res.status(200).json({credentials: [tokens[i].code, tokens[i].slack, tokens[i].name, tokens[i].password]});
         }
     }
+    */
 
     const randarray = new Uint8Array(16);
     crypto.getRandomValues(randarray);
@@ -197,29 +202,20 @@ app.post("/genToken", async function(req, res) {
 
 
 app.post("/initEvent", async function (req, res) {
-    const { slack, password, cityName } = req.body;
-    if (!slack || !password || !cityName) {
+    const { code, password, cityName } = req.body;
+    if (!code || !password || !cityName) {
         return res.status(400).json({ error: "Missing parameter(s)"});
     }
-    let index = -1
-    for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].password == password) {
-            index = i;
-        }
-    }
-    if (index == -1) {
+    if (!tokens[code] || tokens[code].password != password) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
     }
-    let token = tokens[index];
-    if (token.slack != slack) {
-        return res.status(401).json({error: "Invalid Jumbotron token aspect"});
-    }
 
-    tokens[index].cityName = cityName;
-    console.log(tokenLog(slack, tokens[index].name), `Set ${cityName} as location visible`)
+    tokens[code].cityName = cityName;
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible`)
     return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
 })
 
+/*
 app.get("/getLocation", async function (req, res) {
     const { code } = req.query;
     if (!code) {
@@ -240,6 +236,7 @@ app.get("/getLocation", async function (req, res) {
         }
     }
 })
+    */
 
 app.post("/sendPacket", async function (req, res) {
     const { code, password, packet } = req.body;
@@ -247,22 +244,12 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(400).json({error: "Missing parameter(s)"});
     }
 
-    let index = -1
-    for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].password == password) {
-            index = i;
-        }
-    }
-    if (index == -1) {
+    if (!tokens[code] || tokens[code].password != password) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
-    }
-    let token = tokens[index];
-    if (token.code != code) {
-        return res.status(401).json({error: "Invalid Jumbotron token aspect"});
     }
 
     packets[code] = packet;
-    console.log(tokenLog(tokens[index].slack, tokens[index].name), `Updated information based on ${packet}`);
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet}`);
     return res.status(200).json({message: `Updated information based on ${packet}`});
 })
 
