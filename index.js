@@ -102,7 +102,7 @@ function codeGen(token) {
 function randomGen() {
     let code = "";
     for (let i = 0; i <= 3; i++) {
-        code += Math.floor(Math.random()*10);
+        code += Math.floor(Math.random()*9) + 1;
     }
     /*
     if (codes.indexOf(code) == -1) {
