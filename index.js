@@ -265,7 +265,7 @@ app.get("/getSession", async function(req, res) {
     if (!code) {
         return res.status(400).json({error: "No event code provided"});
     }
-    if (!packets[code]) {
+    if (!tokens[code]) {
         return res.status(400).json({error: "No event found based on provided code"});
     }
     res.set({
