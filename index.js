@@ -96,7 +96,7 @@ let sessions = {};
 function codeGen(token) {
     let code = randomGen()
     tokens[code] = token;
-    packets[code] = {data: null};
+    packets[code] = {null};
     return code;
 }
 
