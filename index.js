@@ -91,11 +91,12 @@ function timeDiff(timestamp) {
 
 let tokens = {};
 let packets = {};
+let sessions = {};
 
 function codeGen(token) {
     let code = randomGen()
     tokens[code] = token;
-    packets[code] = "";
+    packets[code] = {data: null};
     return code;
 }
 
@@ -196,6 +197,7 @@ app.post("/genToken", async function(req, res) {
     newToken.slack = scopes.slack_id;
     newToken.password = cryptoCode;
     const jumbotronCode = await codeGen(newToken);
+    sessions[jumbotronCode] = [];
     console.log(tokenLog(newToken.slack, newToken.name), `Generated new code ${jumbotronCode}`)
     return res.status(200).json({credentials: [jumbotronCode, newToken.slack, newToken.name, newToken.password]});
 });
@@ -228,6 +230,15 @@ app.post("/sendPacket", async function (req, res) {
 
     packets[code] = packet;
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet}`);
+
+    if (sessions[code].length != 0) {
+        let payload = JSON.stringify({data: packet, cityName: tokens[code].cityName})
+        for (let i = 0; i < sessions[code].length; i++) {
+            sessions[code][i].write(`data: ${payload}\n\n`)
+        }
+        return res.status(200).json({message: `Updated information based on ${packet} and broadcasted to ${sessions[code].length} users`});
+    }
+
     return res.status(200).json({message: `Updated information based on ${packet}`});
 })
 
@@ -246,6 +257,57 @@ app.get("/getPacket", async function (req, res) {
     }
     return res.status(200).json({data: packet, cityName: tokens[code].cityName});
 })
+
+app.get("/getSession", async function(req, res) {
+    const { code } = req.query;
+    if (!code) {
+        return res.status(400).json({error: "No event code provided"});
+    }
+    if (!packets[code]) {
+        return res.status(400).json({error: "No event found based on provided code"});
+    }
+    res.set({
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+    });
+    res.flushHeaders();
+
+    sessions[code].push(res);
+
+    res.on("close", () => {
+        sessions[code] = sessions[code].filter(e => e != res);
+    });
+})
+
+/*
+app.get('/orders/statistics', (req, res) => {
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Send random order statistics every second
+    const interval = setInterval(() => {
+        const ordersStats = {
+            ordersCount: Math.floor(Math.random() * 100),
+            turnOver: Math.floor(Math.random() * 1000),
+        };
+
+        // Send data to the client
+        res.write(`data: ${JSON.stringify(ordersStats)}\n\n`);
+    }, 1000);
+
+    // Store the interval to clear later
+    intervals.push(interval);
+
+    // Clean up when the connection is closed
+    req.on('close', () => {
+        clearInterval(interval);
+        intervals = intervals.filter((i) => i !== interval);
+    });
+});
+*/
 
 const port = process.env.PORT || 3000; 
 
