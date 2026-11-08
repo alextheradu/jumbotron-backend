@@ -231,6 +231,8 @@ app.post("/sendPacket", async function (req, res) {
     packets[code] = packet;
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet}`);
 
+    console.log("DEVLOG", sessions[code])
+
     if (sessions[code].length != 0) {
         let payload = JSON.stringify({data: packet, cityName: tokens[code].cityName})
         for (let i = 0; i < sessions[code].length; i++) {
@@ -274,6 +276,7 @@ app.get("/getSession", async function(req, res) {
     res.flushHeaders();
 
     sessions[code].push(res);
+    console.log("DEVLOG", `Added ${res} to ${code}`);
 
     res.on("close", () => {
         sessions[code] = sessions[code].filter(e => e != res);
