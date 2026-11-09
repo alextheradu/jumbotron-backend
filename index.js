@@ -280,9 +280,10 @@ app.get("/getSession", async function(req, res) {
     sessions[code].push(res);
     let payload = JSON.stringify({data: packets[code], cityName: tokens[code].cityName})
     res.write(`data: ${payload}\n\n`);
+    console.log("DEV created session", res, sessions)
 
     res.on("close", () => {
-        sessions[code] = sessions[code].filter(e => e != res);
+        sessions[code] = sessions[code].filter(x => x != res);
     });
 })
 
