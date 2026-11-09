@@ -325,8 +325,8 @@ app.post("/banEvent", async function (req, res) {
 });
 
 app.post("/unbanEvent", async function (req, res) {
-    let { code, password, unbanCode } = req.body;
-    if (!code || !password || !unbanCode) {
+    let { code, password, unbanSlack } = req.body;
+    if (!code || !password || !unbanSlack) {
         return res.status(400).json({error: "Admin permissions not present or missing list"});
     }
     if (!tokens[code] || tokens[code].password != password) {
@@ -336,8 +336,8 @@ app.post("/unbanEvent", async function (req, res) {
         return res.status(401).json({error: "Admin permissions not present"});
     }
 
-    banned = banned.filter(x => x != unbanCode);
-    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unbanned ${unbanCode}`);
+    banned = banned.filter(x => x != unbanSlack);
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unbanned ${unbanSlack}`);
 })
 
 app.get("/getBans", async function (req, res) {
