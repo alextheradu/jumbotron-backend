@@ -278,6 +278,8 @@ app.get("/getSession", async function(req, res) {
     res.flushHeaders();
 
     sessions[code].push(res);
+    let payload = JSON.stringify({data: packets[code], cityName: tokens[code].cityName})
+    res.write(`data: ${payload}\n\n`);
 
     res.on("close", () => {
         sessions[code] = sessions[code].filter(e => e != res);
