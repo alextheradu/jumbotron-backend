@@ -392,6 +392,22 @@ app.post("/banEvent", async function (req, res) {
     }
 });
 
+app.get("/getBans", async function (req, res) {
+    let { code, password } = req.query;
+    if (!code || !password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (admins.indexOf(tokens[code].slack) == -1) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Requested list of banned events");
+    return res.status(200).json({list: JSON.stringify(banned)});
+})
+
 const port = process.env.PORT || 3000; 
 
 app.listen(port, function() {
