@@ -4,7 +4,8 @@ import cors from "cors";
 import crypto from "crypto";
 dotenv.config();
 
-const masterKey = process.env.MASTER;
+let admins = process.env.ADMINS;
+let banned = [];
 
 const app = express();
 app.use(express.json());
@@ -213,7 +214,19 @@ app.post("/initEvent", async function (req, res) {
     }
 
     tokens[code].cityName = cityName;
-    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible`)
+    
+
+    if (sessions[code].length != 0) {
+        let payload = JSON.stringify({data: packets[code], cityName: tokens[code].cityName})
+        for (let i = 0; i < sessions[code].length; i++) {
+            sessions[code][i].write(`data: ${payload}\n\n`)
+        }
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible and broadcast to ${sessions[code].length} users`)
+    }
+    else {
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible`)
+    }
+
     return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
 })
 
@@ -280,41 +293,96 @@ app.get("/getSession", async function(req, res) {
     sessions[code].push(res);
     let payload = JSON.stringify({data: packets[code], cityName: tokens[code].cityName})
     res.write(`data: ${payload}\n\n`);
-    console.log("DEV created session", res, sessions)
 
     res.on("close", () => {
         sessions[code] = sessions[code].filter(x => x != res);
     });
 })
 
-/*
-app.get('/orders/statistics', (req, res) => {
-    // Set headers for SSE
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+app.get("/allEvents", async function (req, res) {
+    let { code, password } = req.query;
+    if (!code || !password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (admins.indexOf(tokens[code].slack) == -1) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
 
-    // Send random order statistics every second
-    const interval = setInterval(() => {
-        const ordersStats = {
-            ordersCount: Math.floor(Math.random() * 100),
-            turnOver: Math.floor(Math.random() * 1000),
-        };
+    let items = JSON.stringify(tokens);
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Requested all events through admin")
+    return res.status(200).json({list: items});
+})
 
-        // Send data to the client
-        res.write(`data: ${JSON.stringify(ordersStats)}\n\n`);
-    }, 1000);
+app.post("/setEvents", async function (req, res) {
+    let { code, password, items } = req.body;
+    if (!code || !password || !items) {
+        return res.status(400).json({error: "Admin permissions not present or missing list"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (admins.indexOf(tokens[code].slack) == -1) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Replaced all events through admin")
 
-    // Store the interval to clear later
-    intervals.push(interval);
+    tokens = JSON.parse(items);
+    return res.status(200).json({message: "Updated events based on manual list"});
+})
 
-    // Clean up when the connection is closed
-    req.on('close', () => {
-        clearInterval(interval);
-        intervals = intervals.filter((i) => i !== interval);
-    });
+app.post("/banEvent", async function (req, res) {
+    let { code, password, banCode, banList } = req.body;
+    if (!code || !password || (!banCode && !banList)) {
+        return res.status(400).json({error: "Admin permissions not present or missing list"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (admins.indexOf(tokens[code].slack) == -1) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+
+    const terminateAndPurge = (targetCode) => {
+        // Terminate and close all active SSE participant connections
+        if (sessions[targetCode] && sessions[targetCode].length > 0) {
+            for (let clientRes of sessions[targetCode]) {
+                try {
+                    clientRes.write(`data: ${JSON.stringify({ error: "Event terminated/banned by administrator" })}\n\n`);
+                    clientRes.end();
+                } catch (e) {
+                    // Ignore already-closed socket errors
+                }
+            }
+            delete sessions[targetCode];
+        }
+
+        // Remove tokens and packet data from memory
+        delete tokens[targetCode];
+        delete packets[targetCode];
+
+        // Add to banned array if not already present
+        if (!banned.includes(targetCode)) {
+            banned.push(targetCode);
+        }
+    };
+
+    if (banCode) {
+        terminateAndPurge(banCode);
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Banned and purged event code ${banCode}`);
+        return res.status(200).json({message: `Event ${banCode} has been banned and terminated.`});
+    }
+    else if (banList) {
+        banned = banList;
+        for (let bCode of banned) {
+            terminateAndPurge(bCode);
+        }
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ban list and purged active events`);
+        return res.status(200).json({message: `Ban list updated and active sessions terminated.`});
+    }
 });
-*/
 
 const port = process.env.PORT || 3000; 
 
