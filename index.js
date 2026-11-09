@@ -23,73 +23,6 @@ app.use(cors({
 
 let clientID = "e86d4d7eec9c546e6c4700388d4fea7f";
 
-
-/*
-function timeDiff(timestamp) {
-    if (timestamp == null) {
-        return true;
-    }
-    let clock = new Date();
-    let curr = clock.getTime();
-    let diff = curr - timestamp;
-    diff = diff/1000/60;
-    if (diff > 30) {
-        return true
-    }
-    return false;
-}
-    */
-
-
-/*async function sendDataToSlack() {
-    const slackToken = process.env.BOT_TOKEN;
-    const channelId = process.env.CHANNEL_ID;
-
-    if (!slackToken || !channelId) {
-        console.error("Missing Slack environment variables.");
-        return;
-    }
-
-    // Isolate only emails per city; completely exclude active sessions and liveshare states
-    const emailOnlyBackup = events.map(event => ({
-        name: event.name,
-        acceptedEmails: [...event.acceptedEmails]
-    }));
-
-    // Package directly into the requested structured JSON format
-    const adminConsolePayload = {
-        authKey: masterKey || 'your_master_key',
-        eventsNew: emailOnlyBackup,
-        sessionsNew: [] // Explicitly reset sessions to keep it clean
-    };
-
-    const payloadString = JSON.stringify(adminConsolePayload, null, 2);
-
-    try {
-        // Post directly to the chat channel as a clean markdown block for your admin console
-        const response = await fetch("https://slack.com/api/chat.postMessage", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": `Bearer ${slackToken}`
-            },
-            body: JSON.stringify({
-                channel: channelId,
-                text: `🚨 *Jumbotron Email Configuration Snapshot* 🚨\nTotal Tracked Cities: *${emailOnlyBackup.length}* | _Active active login sessions excluded._\n\n*Copy and paste this JSON data block directly into your admin console or use with /mutate:* \n\`\`\`json\n${payloadString}\n\`\`\``
-            })
-        });
-
-        const result = await response.json();
-        if (!result.ok) {
-            console.error("Slack chat.postMessage Error:", result.error);
-        } else {
-            console.log("JSON admin console payload posted to Slack channel!");
-        }
-    } catch (err) {
-        console.error("Failed to post JSON backup to Slack:", err);
-    }
-}*/
-
 let tokens = {};
 let packets = {};
 let sessions = {};
@@ -106,13 +39,6 @@ function randomGen() {
     for (let i = 0; i <= 3; i++) {
         code += Math.floor(Math.random()*9) + 1;
     }
-    /*
-    if (codes.indexOf(code) == -1) {
-        return code;
-    }
-    else {
-        return randomGen();
-    }*/
    if (tokens[code]) {
     return randomGen();
    }
@@ -124,7 +50,6 @@ function tokenLog(slack, name) {
 }
 
 // --- Express Routes ---
-
 
 app.post("/genToken", async function(req, res) {
     const { code } = req.body;
@@ -172,7 +97,7 @@ app.post("/genToken", async function(req, res) {
         return res.status(401).json({error: "Banned user"});
     }
 
-    if (true) { // keeps variables sub-local
+    if (true) {
         let expanded = Object.values(tokens);
         let index = expanded.findIndex((e) => {
             return e.slack == scopes.slack_id;
@@ -182,13 +107,6 @@ app.post("/genToken", async function(req, res) {
             return res.status(200).json({credentials: [expanded2[index][0], scopes.slack_id, scopes.first_name, tokens[expanded2[index][0]].password]})
         }
     }
-    /*
-    for (let i = 0; i < tokens.length; i++) {
-        if (tokens[i].slack == scopes.slack_id) {
-            return res.status(200).json({credentials: [tokens[i].code, tokens[i].slack, tokens[i].name, tokens[i].password]});
-        }
-    }
-    */
 
     const randarray = new Uint8Array(16);
     crypto.getRandomValues(randarray);
@@ -217,6 +135,10 @@ app.post("/initEvent", async function (req, res) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
     }
 
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
     tokens[code].cityName = cityName;
     
 
@@ -241,12 +163,12 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(400).json({error: "Missing parameter(s)"});
     }
 
-    if (banned.indexOf(code) != -1) {
-        return res.status(401).json({error: "Banned user"});
-    }
-
     if (!tokens[code] || tokens[code].password != password) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
+    }
+
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
     }
 
     packets[code] = packet;
@@ -276,9 +198,15 @@ app.get("/getPacket", async function (req, res) {
     let packet = packets[code];
     if (!packet) {
         if (tokens[code]) {
+            if (banned.indexOf(tokens[code].slack) != -1) {
+                return res.status(401).json({error: "Banned user"});
+            }
             return res.status(200).json({data: null, cityName: tokens[code].cityName});
         }
         return res.status(400).json({error: "No event found"});
+    }
+    if (tokens[code] && banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
     }
     return res.status(200).json({data: packet, cityName: tokens[code].cityName});
 })
@@ -291,6 +219,10 @@ app.get("/getSession", async function(req, res) {
     if (!tokens[code]) {
         return res.status(400).json({error: "No event found based on provided code"});
     }
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
     res.set({
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -342,8 +274,59 @@ app.post("/setEvents", async function (req, res) {
 })
 
 app.post("/banEvent", async function (req, res) {
-    let { code, password, banCode, banList } = req.body;
-    if (!code || !password || (!banCode && !banList)) {
+    let { code, password, banSlack, banList } = req.body;
+    if (!code || !password || (!banSlack && !banList)) {
+        return res.status(400).json({error: "Admin permissions not present or missing parameters"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+    if (admins.indexOf(tokens[code].slack) == -1) {
+        return res.status(401).json({error: "Admin permissions not present"});
+    }
+
+    const banUserBySlack = (targetSlack) => {
+        // Iterate through tokens and purge any session associated with this Slack ID
+        for (let [jumbotronCode, tokenObj] of Object.entries(tokens)) {
+            if (tokenObj.slack === targetSlack) {
+                if (sessions[jumbotronCode] && sessions[jumbotronCode].length > 0) {
+                    for (let clientRes of sessions[jumbotronCode]) {
+                        try {
+                            clientRes.write(`data: ${JSON.stringify({ error: "User banned by administrator" })}\n\n`);
+                            clientRes.end();
+                        } catch (e) {}
+                    }
+                    delete sessions[jumbotronCode];
+                }
+                delete tokens[jumbotronCode];
+                delete packets[jumbotronCode];
+            }
+        }
+
+        if (!banned.includes(targetSlack)) {
+            banned.push(targetSlack);
+        }
+    };
+
+    if (banSlack) {
+        let targetSlack = banSlack.trim();
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Banned and purged Slack ID ${targetSlack}`);
+        banUserBySlack(targetSlack);
+        return res.status(200).json({message: `Slack ID ${targetSlack} has been banned and terminated.`});
+    }
+    else if (banList) {
+        banned = banList;
+        for (let targetSlack of banned) {
+            banUserBySlack(targetSlack);
+        }
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ban list and purged active events`);
+        return res.status(200).json({message: `Ban list updated and active sessions terminated.`});
+    }
+});
+
+app.post("/unbanEvent", async function (req, res) {
+    let { code, password, unbanCode } = req.body;
+    if (!code || !password || !unbanCode) {
         return res.status(400).json({error: "Admin permissions not present or missing list"});
     }
     if (!tokens[code] || tokens[code].password != password) {
@@ -353,44 +336,9 @@ app.post("/banEvent", async function (req, res) {
         return res.status(401).json({error: "Admin permissions not present"});
     }
 
-    const terminateAndPurge = (targetCode) => {
-        // Terminate and close all active SSE participant connections
-        if (sessions[targetCode] && sessions[targetCode].length > 0) {
-            for (let clientRes of sessions[targetCode]) {
-                try {
-                    clientRes.write(`data: ${JSON.stringify({ error: "Event terminated/banned by administrator" })}\n\n`);
-                    clientRes.end();
-                } catch (e) {
-                    // Ignore already-closed socket errors
-                }
-            }
-            delete sessions[targetCode];
-        }
-
-        // Remove tokens and packet data from memory
-        delete tokens[targetCode];
-        delete packets[targetCode];
-
-        // Add to banned array if not already present
-        if (!banned.includes(targetCode)) {
-            banned.push(targetCode);
-        }
-    };
-
-    if (banCode) {
-        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Banned and purged event code ${banCode}`);
-        terminateAndPurge(banCode);
-        return res.status(200).json({message: `Event ${banCode} has been banned and terminated.`});
-    }
-    else if (banList) {
-        banned = banList;
-        for (let bCode of banned) {
-            terminateAndPurge(bCode);
-        }
-        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ban list and purged active events`);
-        return res.status(200).json({message: `Ban list updated and active sessions terminated.`});
-    }
-});
+    banned = banned.filter(x => x != unbanCode);
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unbanned ${unbanCode}`);
+})
 
 app.get("/getBans", async function (req, res) {
     let { code, password } = req.query;
@@ -404,7 +352,7 @@ app.get("/getBans", async function (req, res) {
         return res.status(401).json({error: "Admin permissions not present"});
     }
 
-    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Requested list of banned events");
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Requested list of banned users");
     return res.status(200).json({list: JSON.stringify(banned)});
 })
 
