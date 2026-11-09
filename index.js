@@ -167,6 +167,10 @@ app.post("/genToken", async function(req, res) {
     if (!scopes.ysws_eligible || scopes.verification_status != "verified") {
         return res.status(401).json({ error: "User is not eligible" });
     }
+    
+    if (banned.indexOf(scopes.slack_id) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
 
     if (true) { // keeps variables sub-local
         let expanded = Object.values(tokens);
