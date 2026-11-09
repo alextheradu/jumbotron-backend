@@ -241,6 +241,10 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(400).json({error: "Missing parameter(s)"});
     }
 
+    if (banned.indexOf(code) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
     if (!tokens[code] || tokens[code].password != password) {
         return res.status(401).json({error: "Invalid Jumbotron token aspect"}); 
     }
