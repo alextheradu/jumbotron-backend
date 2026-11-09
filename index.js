@@ -378,8 +378,8 @@ app.post("/banEvent", async function (req, res) {
     };
 
     if (banCode) {
-        terminateAndPurge(banCode);
         console.log(tokenLog(tokens[code].slack, tokens[code].name), `Banned and purged event code ${banCode}`);
+        terminateAndPurge(banCode);
         return res.status(200).json({message: `Event ${banCode} has been banned and terminated.`});
     }
     else if (banList) {
