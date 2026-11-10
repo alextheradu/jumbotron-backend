@@ -2,10 +2,15 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import crypto from "crypto";
+import validator from "validator"
 dotenv.config();
 
-let admins = process.env.ADMINS;
+let admins = process.env.ADMINS || "U08EMT46G3V";
+admins = admins.split(";")
+
 let banned = [];
+
+let bridgeRequests = [];
 
 const app = express();
 app.use(express.json());
@@ -139,6 +144,8 @@ app.post("/initEvent", async function (req, res) {
         return res.status(401).json({error: "Banned user"});
     }
 
+    cityName = validator.escape(cityName.trim());
+
     tokens[code].cityName = cityName;
     
 
@@ -155,7 +162,6 @@ app.post("/initEvent", async function (req, res) {
 
     return res.status(200).json({message: `Set ${cityName} as location visible to participants`});
 })
-
 
 app.post("/sendPacket", async function (req, res) {
     const { code, password, packet } = req.body;
@@ -237,6 +243,126 @@ app.get("/getSession", async function(req, res) {
     res.on("close", () => {
         sessions[code] = sessions[code].filter(x => x != res);
     });
+})
+
+app.post("/mergeRequest", async function (req, res) {
+    const { code, password, destination } = req.body;
+    if (!code || !password || !destination) {
+        return res.status(401).json({error: "Missing parameters"});
+    }
+    if (!tokens[code] || !tokens[destination]) {
+        return res.status(400).json({error: "Requesting event or recipient not found"});
+    }
+    if (tokens[code].password != password) {
+        return res.status(401).json({error: "Invalid authentication"})
+    }
+    if (tokens[destination].bridge || tokens[code].bridge) {
+        return res.status(400).json({error: "Either this event or the target event is not a root and already has a merge source"});
+    }
+
+    // Check any already outgoing requests from this user; if this is an additional, terminate every request
+    let currRequests = bridgeRequests.filter(x => x.code == code);
+    if (currRequests.length >= 1) {
+        for (let i = 0;  i < currRequests.length; i++) {
+            currRequests[i].connection.close();
+        }
+        return res.status(400).json({error: "More than one request found; all terminated"});
+    }
+
+    res.set({
+        "Content-Type": "text/stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+    })
+    res.flushHeaders();
+
+    let body = {
+        slack: tokens[code].slack,
+        name: tokens[code].name,
+        code: code,
+        recipient: destination,
+        connection: res
+    }
+
+    bridgeRequests.push(body);
+
+    res.write("data: request pending \n\n")
+
+    res.on("close", () => {
+        bridgeRequests = bridgeRequests.filter(x => x != body);
+    })
+
+})
+
+app.get("/getMergeRequests", async function (req, res) {
+    const { code, password } = req.query;
+    if (!code || !password) {
+        return res.status(401).json({error: "No credentials"});
+    } 
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(400).json({error: "Invalid event or incorrect password"});
+    }
+
+    let outgoingRequests = bridgeRequests.filter(x => x.code == code);
+    if (tokens[code].bridge || outgoingRequests.length != 0) {
+        for (let i = 0; i < outgoingRequests.length; i++) {
+            outgoingRequests[i].connection.close();
+        }
+        return res.status(400).json({error: "This event can't accept requests as it's not a root event, or this event has outgoing merge requests"});
+    }
+
+    let requests = bridgeRequests.filter(x => x.destination == code);
+    return res.status(200).json({requests: requests});
+})
+
+app.post("/ackMergeRequest", async function (req, res) {
+    // recipient here is the event that made the request
+    const { code, password, recipient, accept } = req.body;
+    if (!code || !password || !recipient || accept == null) {
+        return res.status(400).json({error: "Missing param(s)"});
+    }
+
+    // check root auth
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(400).json({error: "Invalid event or incorrect password"});
+    }
+    // check recipient existence
+    if (!tokens[recipient]) {
+        return res.status(400).json({error: "Invalid recipient event"});
+    }
+
+    // check if either event is already merged
+    if (tokens[code].bridge || tokens[recipient].bridge) {
+        return res.status(400).json({error: "Either this event or the target event is not a root and already has a merge source"});
+    }
+
+    // Check any already outgoing requests from this user; if this is an additional, terminate every request before making this event a root
+    let currRequests = bridgeRequests.filter(x => x.code == code);
+    if (currRequests.length >= 1) {
+        for (let i = 0;  i < currRequests.length; i++) {
+            currRequests[i].connection.close();
+        }
+    }
+
+    let request = bridgeRequests.filter(x => x.recipient == code && x.code == recipient);
+    if (request.length == 0) {
+        return res.status(400).json({error: "This request wasn't found"})
+    }
+    if (accept == true) {
+        tokens[recipient].bridge = code;
+        if (!tokens[code].sources) {
+            tokens[code].sources = [recipient];
+        }
+        else {
+            tokens[code].sources.push(recipient);
+        }
+        request[0].connection.write("data: accepted \n\n");
+        request[0].connection.close();
+    }
+    else {
+        request[0].connection.write("data: rejected \n\n");
+        request[0].connection.close();
+    }
 })
 
 app.get("/allEvents", async function (req, res) {
@@ -338,6 +464,7 @@ app.post("/unbanEvent", async function (req, res) {
 
     banned = banned.filter(x => x != unbanSlack);
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unbanned ${unbanSlack}`);
+    return res.status(200).json({message: "Unbanned user"});
 })
 
 app.get("/getBans", async function (req, res) {
