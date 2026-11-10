@@ -295,6 +295,7 @@ app.get("/mergeRequest", async function (req, res) {
     bridgeRequests.push(body);
 
     res.write("data: request pending \n\n")
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Requesting merge into ${destination}`)
 
     res.on("close", () => {
         bridgeRequests = bridgeRequests.filter(x => x != body);
