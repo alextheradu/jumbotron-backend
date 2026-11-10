@@ -534,7 +534,7 @@ app.get("/getBans", async function (req, res) {
     return res.status(200).json({ list: JSON.stringify(banned) });
 });
 
-app.get("/admins", async function (req, res) {
+app.get("/getAdmins", async function (req, res) {
     const { code, password} = req.query;
     if (!code || !password) {
         return res.status(401).json({ error: "Failed to authenticate; missing params" });
