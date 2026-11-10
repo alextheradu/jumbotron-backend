@@ -272,7 +272,7 @@ app.get("/mergeRequest", async function (req, res) {
     let currRequests = bridgeRequests.filter(x => x.code == code);
     if (currRequests.length >= 1) {
         for (let i = 0;  i < currRequests.length; i++) {
-            currRequests[i].connection.close();
+            currRequests[i].connection.end();
         }
         return res.status(400).json({error: "More than one request found; all terminated"});
     }
