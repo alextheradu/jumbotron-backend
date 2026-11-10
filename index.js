@@ -347,7 +347,7 @@ app.post("/ackMergeRequest", async function (req, res) {
         if (!tokens[code].sources) {
             tokens[code].sources = [recipient];
         } else {
-            tokens[code].sources.push(recipient);
+            tokens[code].sources.push(tokens[recipient].slack);
         }
         if (targetConnection) {
             targetConnection.write("data: accepted\n\n");
