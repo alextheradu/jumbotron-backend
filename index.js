@@ -247,8 +247,8 @@ app.get("/getSession", async function(req, res) {
     });
 })
 
-app.post("/mergeRequest", async function (req, res) {
-    const { code, password, destination } = req.body;
+app.get("/mergeRequest", async function (req, res) {
+    const { code, password, destination } = req.query;
     if (!code || !password || !destination) {
         return res.status(401).json({error: "Missing parameters"});
     }
@@ -428,11 +428,38 @@ app.post("/setEvents", async function (req, res) {
     if (admins.indexOf(tokens[code].slack) == -1) {
         return res.status(401).json({error: "Admin permissions not present"});
     }
-    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Replaced all events through admin")
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), "Replaced all events through admin");
 
-    tokens = JSON.parse(items);
-    return res.status(200).json({message: "Updated events based on manual list"});
-})
+    // 1. Close all active SSE sessions
+    for (let [jumbotronCode, clientResList] of Object.entries(sessions)) {
+        if (clientResList && clientResList.length > 0) {
+            for (let clientRes of clientResList) {
+                try {
+                    clientRes.write(`data: ${JSON.stringify({ error: "Events database replaced by administrator" })}\n\n`);
+                    clientRes.end();
+                } catch (e) {}
+            }
+        }
+    }
+
+    // 2. Parse and update tokens (preserving any existing properties like cityName inside token objects)
+    try {
+        tokens = JSON.parse(items);
+    } catch (e) {
+        return res.status(400).json({error: "Invalid JSON format for items"});
+    }
+
+    // 3. Reset all packets
+    packets = {};
+
+    // 4. Re-initialize sessions map for the newly loaded tokens
+    sessions = {};
+    for (let jumbotronCode of Object.keys(tokens)) {
+        sessions[jumbotronCode] = [];
+    }
+
+    return res.status(200).json({message: "Updated events, closed all active sessions, and reset packets successfully."});
+});
 
 app.post("/banEvent", async function (req, res) {
     let { code, password, banSlack, banList } = req.body;
