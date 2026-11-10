@@ -278,7 +278,7 @@ app.get("/mergeRequest", async function (req, res) {
     }
 
     res.set({
-        "Content-Type": "text/stream",
+        "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive"
     })
