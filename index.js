@@ -2,7 +2,6 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import crypto from "crypto";
-import validator from "validator"
 dotenv.config();
 
 let admins = process.env.ADMINS || "U08EMT46G3V";
@@ -144,9 +143,7 @@ app.post("/initEvent", async function (req, res) {
         return res.status(401).json({error: "Banned user"});
     }
 
-    cityName = validator.escape(cityName.trim());
-
-    tokens[code].cityName = cityName;
+    tokens[code].cityName = cityName.trim();
     
 
     if (sessions[code].length != 0) {
