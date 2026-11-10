@@ -103,7 +103,12 @@ app.post("/genToken", async function(req, res) {
     let index = expanded.findIndex((e) => e.slack == scopes.slack_id);
     if (index != -1) {
         let expanded2 = Object.entries(tokens);
-        return res.status(200).json({ credentials: [expanded2[index][0], scopes.slack_id, scopes.first_name, tokens[expanded2[index][0]].password] });
+        let existingCode = expanded2[index][0];
+        let userToken = tokens[existingCode];
+        return res.status(200).json({ 
+            credentials: [existingCode, scopes.slack_id, scopes.first_name, userToken.password], 
+            sources: userToken.sources || [] 
+        });
     }
 
     const randarray = new Uint8Array(16);
@@ -117,10 +122,15 @@ app.post("/genToken", async function(req, res) {
     newToken.name = scopes.first_name;
     newToken.slack = scopes.slack_id;
     newToken.password = cryptoCode;
-    const jumbotronCode = await codeGen(newToken);
+    newToken.sources = []; // Initialize sources array
+    const jumbotronCode = codeGen(newToken);
     sessions[jumbotronCode] = [];
     console.log(tokenLog(newToken.slack, newToken.name), `Generated new code ${jumbotronCode}`);
-    return res.status(200).json({ credentials: [jumbotronCode, newToken.slack, newToken.name, newToken.password] });
+    
+    return res.status(200).json({ 
+        credentials: [jumbotronCode, newToken.slack, newToken.name, newToken.password],
+        sources: newToken.sources 
+    });
 });
 
 app.post("/initEvent", async function (req, res) {
@@ -376,6 +386,10 @@ app.post("/ackMergeRequest", async function (req, res) {
     // Clean up request and connection mapping for the handled incoming request
     bridgeRequests = bridgeRequests.filter(x => !(x.recipient == code && x.code == recipient));
     delete bridgeConnections[recipient];
+
+    if (accept == true) {
+        return res.status(200).json({ message: "Merge request processed successfully", sources: tokens[code].sources });
+    }
 
     return res.status(200).json({ message: "Merge request processed successfully" });
 });
