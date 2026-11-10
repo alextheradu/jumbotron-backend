@@ -174,7 +174,12 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(401).json({error: "Banned user"});
     }
 
-    packets[code] = packet;
+    if (tokens[code].bridge) {
+        packets[tokens[code].bridge] = packet;
+    }
+    else {
+        packets[code] = packet;
+    }
     
 
     if (sessions[code].length != 0) {
@@ -253,6 +258,12 @@ app.post("/mergeRequest", async function (req, res) {
     if (tokens[code].password != password) {
         return res.status(401).json({error: "Invalid authentication"})
     }
+    
+    // Ban enforcement check for mergeRequest
+    if (banned.indexOf(tokens[code].slack) != -1 || banned.indexOf(tokens[destination].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
     if (tokens[destination].bridge || tokens[code].bridge) {
         return res.status(400).json({error: "Either this event or the target event is not a root and already has a merge source"});
     }
@@ -300,6 +311,11 @@ app.get("/getMergeRequests", async function (req, res) {
         return res.status(400).json({error: "Invalid event or incorrect password"});
     }
 
+    // Ban enforcement check for getMergeRequests
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
     let outgoingRequests = bridgeRequests.filter(x => x.code == code);
     if (tokens[code].bridge || outgoingRequests.length != 0) {
         for (let i = 0; i < outgoingRequests.length; i++) {
@@ -326,6 +342,11 @@ app.post("/ackMergeRequest", async function (req, res) {
     // check recipient existence
     if (!tokens[recipient]) {
         return res.status(400).json({error: "Invalid recipient event"});
+    }
+
+    // Ban enforcement check for ackMergeRequest (both root/code and target/recipient)
+    if (banned.indexOf(tokens[code].slack) != -1 || banned.indexOf(tokens[recipient].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
     }
 
     // check if either event is already merged
@@ -360,6 +381,23 @@ app.post("/ackMergeRequest", async function (req, res) {
         request[0].connection.write("data: rejected \n\n");
         request[0].connection.close();
     }
+})
+
+app.get("/getMergedEvents", async function (req, res) {
+    let { code, password } = req.query;
+    if (!code || !password) {
+        return res.status(401).json({error: "Invalid credentials"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({error: "Invalid credentials or event does not exist"});
+    }
+
+    // Ban enforcement check
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({error: "Banned user"});
+    }
+
+    return res.status(200).json({events: tokens[code].sources});
 })
 
 app.get("/allEvents", async function (req, res) {
