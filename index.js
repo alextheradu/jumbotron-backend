@@ -251,17 +251,16 @@ app.get("/mergeRequest", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    if (tokens[destination].bridge || tokens[code].bridge) {
+    // Rule 3: Events already merged to a source can't make new requests
+    if (tokens[code].bridge || tokens[destination].bridge) {
         return res.status(400).json({ error: "Either this event or the target event is not a root and already has a merge source" });
     }
 
-    // Close any previous pending connection from this code
-    if (bridgeConnections[code]) {
-        bridgeConnections[code].end();
-        delete bridgeConnections[code];
+    // Rule 1: Users with current outgoing requests can't make new requests
+    let existingOutgoing = bridgeRequests.some(x => x.code == code);
+    if (existingOutgoing) {
+        return res.status(400).json({ error: "You already have an active outgoing merge request. Cancel or complete it first." });
     }
-
-    bridgeRequests = bridgeRequests.filter(x => x.code != code);
 
     res.set({
         "Content-Type": "text/event-stream",
@@ -270,7 +269,6 @@ app.get("/mergeRequest", async function (req, res) {
     });
     res.flushHeaders();
 
-    // Store connection separately from JSON-serializable request metadata
     bridgeConnections[code] = res;
 
     let body = {
@@ -304,13 +302,13 @@ app.get("/getMergeRequests", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
+    // Rule 3: Events already merged can't accept/view incoming requests
     let outgoingRequests = bridgeRequests.filter(x => x.code == code);
     if (tokens[code].bridge || outgoingRequests.length != 0) {
         return res.status(400).json({ error: "This event can't accept requests as it's not a root event, or this event has outgoing merge requests" });
     }
 
     let requests = bridgeRequests.filter(x => x.recipient == code);
-    // Safe to return JSON now since bridgeRequests contains no circular references!
     return res.status(200).json({ requests: requests });
 });
 
@@ -331,6 +329,7 @@ app.post("/ackMergeRequest", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
+    // Rule 3: Events already merged to a source can't accept incoming requests
     if (tokens[code].bridge || tokens[recipient].bridge) {
         return res.status(400).json({ error: "Either this event or the target event is not a root and already has a merge source" });
     }
@@ -338,6 +337,20 @@ app.post("/ackMergeRequest", async function (req, res) {
     let request = bridgeRequests.filter(x => x.recipient == code && x.code == recipient);
     if (request.length == 0) {
         return res.status(400).json({ error: "This request wasn't found" });
+    }
+
+    // Rule 2: Users with current outgoing requests have those cancelled upon accepting an incoming request
+    if (accept === true) {
+        let myOutgoingRequests = bridgeRequests.filter(x => x.code == code);
+        for (let outReq of myOutgoingRequests) {
+            let outConn = bridgeConnections[outReq.code];
+            if (outConn) {
+                outConn.write("data: cancelled due to accepting another merge\n\n");
+                outConn.end();
+            }
+        }
+        // Clean up any outgoing requests for this code
+        bridgeRequests = bridgeRequests.filter(x => x.code != code);
     }
 
     let targetConnection = bridgeConnections[recipient];
@@ -360,7 +373,7 @@ app.post("/ackMergeRequest", async function (req, res) {
         }
     }
 
-    // Clean up request and connection mapping
+    // Clean up request and connection mapping for the handled incoming request
     bridgeRequests = bridgeRequests.filter(x => !(x.recipient == code && x.code == recipient));
     delete bridgeConnections[recipient];
 
