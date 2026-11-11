@@ -410,6 +410,45 @@ app.get("/getMergedEvents", async function (req, res) {
     return res.status(200).json({ events: tokens[code].sources });
 });
 
+app.post("/unmergeEvents", async function (req, res) {
+    const { code, password, root, slack } = req.body;
+    if (!code || !password || !root || !slack) {
+        return res.status(400).json({ error: "Missing parameters" });
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        return res.status(401).json({ error: "Failed to authenticate" });
+    }
+
+    if (!tokens[root]) {
+        return res.status(400).json({ error: "Root event not found" });
+    }
+
+    // Find the event code associated with the given slack ID
+    let targetEntry = Object.entries(tokens).find(([c, t]) => t.slack === slack); // c is code, t is token object
+
+    if (!targetEntry) {
+        return res.status(400).json({ error: "Bridged event not found for the given slack ID" });
+    }
+
+    let targetCode = targetEntry[0];
+
+    // Check if the events are actually merged together
+    if (tokens[targetCode].bridge !== root || !tokens[root].sources || !tokens[root].sources.includes(slack)) {
+        return res.status(400).json({ error: "This event is not actually merged into the specified root event." });
+    }
+
+    // Remove the slack ID from root's sources array
+    if (tokens[root].sources) {
+        tokens[root].sources = tokens[root].sources.filter(x => x != slack);
+    }
+
+    // Remove the bridge property from the target event
+    delete tokens[targetCode].bridge;
+
+    console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unmerged ${targetCode} from ${root}`);
+    return res.status(200).json({ message: "Successfully unmerged events" });
+});
+
 app.get("/allEvents", async function (req, res) {
     let { code, password } = req.query;
     if (!code || !password) {
