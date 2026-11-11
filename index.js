@@ -349,6 +349,9 @@ function purgeEvent(code, endPayload) {
 
     for (const res of sessions[code] || []) sseEnd(res, endPayload);
     closeOrgStreams(code, { type: "revoked", reason: "banned" });
+    for (const [ticket, v] of streamTickets) {
+        if (v.code === code) streamTickets.delete(ticket);
+    }
     delete sessions[code];
     delete tokens[code];
     delete packets[code];
@@ -536,9 +539,40 @@ app.get("/getSession", async function(req, res) {
 //   { type: "revoked", reason }        -> credentials are no longer valid; sign out
 // All merge actions are plain POSTs; their effects arrive back over this feed.
 
-app.get("/orgStream", async function (req, res) {
+// EventSource can't send a body or headers, so instead of putting the password in the
+// stream URL (where proxies log it) the client trades credentials for a single-use ticket
+// that expires in seconds, and opens /orgStream?ticket=... with that.
+const STREAM_TICKET_TTL = 30 * 1000;
+let streamTickets = new Map();   // ticket -> { code, expires }
+
+app.post("/streamTicket", async function (req, res) {
     const code = authOrganizer(req, res);
     if (code == null) return;
+    const now = Date.now();
+    for (const [t, v] of streamTickets) {
+        if (v.expires <= now) streamTickets.delete(t);
+    }
+    const ticket = crypto.randomBytes(32).toString("hex");
+    // Pin the ticket to this event's identity, not just its code: a purged event's code can be
+    // handed to a different organizer within the ticket's lifetime.
+    const t = tokens[code];
+    streamTickets.set(ticket, { code, slack: t.slack, password: t.password, expires: now + STREAM_TICKET_TTL });
+    return res.status(200).json({ ticket });
+});
+
+app.get("/orgStream", async function (req, res) {
+    const ticket = req.query.ticket != null ? String(req.query.ticket) : "";
+    const entry = ticket ? streamTickets.get(ticket) : undefined;
+    if (entry) streamTickets.delete(ticket);
+    if (!entry || entry.expires <= Date.now()) {
+        return res.status(401).json({ error: "Invalid or expired stream ticket" });
+    }
+    const code = entry.code;
+    // The event may have been banned, purged and re-issued, or replaced since the ticket was issued.
+    const token = getToken(code);
+    if (!token || token.slack !== entry.slack || token.password !== entry.password || isBanned(token.slack)) {
+        return res.status(401).json({ error: "Invalid event code or password" });
+    }
 
     openSSE(res);
     if (!orgStreams.has(code)) orgStreams.set(code, new Set());
@@ -553,7 +587,7 @@ app.get("/orgStream", async function (req, res) {
     });
 });
 
-app.get("/mergeState", async function (req, res) {
+app.post("/mergeState", async function (req, res) {
     const code = authOrganizer(req, res);
     if (code == null) return;
     return res.status(200).json(mergeState(code));
@@ -663,14 +697,18 @@ app.post("/unmerge", async function (req, res) {
 
 // --- Admin ---
 
-app.get("/allEvents", async function (req, res) {
+// The read-only endpoints below take credentials in a POST body. GET (credentials in the
+// query string) is kept only so the frontend currently deployed keeps working; remove it
+// once the POST-based frontend is live.
+async function allEvents(req, res) {
     const code = authAdmin(req, res);
     if (code == null) return;
 
     let items = JSON.stringify(tokens);
     logAs(code, "Requested all events through admin");
     return res.status(200).json({ list: items });
-});
+}
+app.route("/allEvents").get(allEvents).post(allEvents);
 
 app.post("/setEvents", async function (req, res) {
     const code = authAdmin(req, res);
@@ -705,6 +743,7 @@ app.post("/setEvents", async function (req, res) {
     tokens = parsed;
     normalizeMerges();
     mergeRequests.clear();
+    streamTickets.clear();
     packets = {};
     sessions = {};
     for (let jumbotronCode of Object.keys(tokens)) {
@@ -763,20 +802,22 @@ app.post("/unbanEvent", async function (req, res) {
     return res.status(200).json({ message: "Unbanned user" });
 });
 
-app.get("/getBans", async function (req, res) {
+async function getBans(req, res) {
     const code = authAdmin(req, res);
     if (code == null) return;
 
     logAs(code, "Requested list of banned users");
     return res.status(200).json({ list: JSON.stringify(banned) });
-});
+}
+app.route("/getBans").get(getBans).post(getBans);
 
-app.get("/getAdmins", async function (req, res) {
+async function getAdmins(req, res) {
     const code = authOrganizer(req, res);
     if (code == null) return;
 
     return res.status(200).json({admins: admins});
-});
+}
+app.route("/getAdmins").get(getAdmins).post(getAdmins);
 
 app.use(function (req, res) {
     res.status(404).json({ error: "Not found" });
