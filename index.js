@@ -36,6 +36,11 @@ let packets = {};
 let sessions = {};               // participant SSE streams, keyed by the code they connected with
 let mergeRequests = new Map();   // requesterCode -> { from, to, createdAt }
 let orgStreams = new Map();      // organizer code -> Set<res> (the /orgStream SSE feeds)
+// Demo time (participant screenshare), keyed by the event's own code: every venue has its own
+// projector, so merged events still present separately.
+//   demos.get(code) = { enabled, board, screenCode, screen: res|null, presenter: null | { id, name, token, res, timer } }
+//   `board` shows the announcement and up next on the big screen; off, it only carries demos.
+let demos = new Map();
 
 function codeGen(token) {
     let code = randomGen();
@@ -177,6 +182,12 @@ setInterval(() => {
             try { res.write(": ping\n\n"); } catch (e) {}
         }
     }
+    for (const d of demos.values()) {
+        for (const res of [d.screen, d.presenter && d.presenter.res]) {
+            if (!res) continue;
+            try { res.write(": ping\n\n"); } catch (e) {}
+        }
+    }
 }, 25000).unref();
 
 // --- Merge model ---
@@ -269,6 +280,7 @@ function participantPayload(code) {
     const root = getRootCode(code);
     return {
         data: packets[root] ?? null,
+        demos: !!(demos.get(code) && demos.get(code).enabled),
         cityName: (tokens[root] && tokens[root].cityName) || (tokens[code] && tokens[code].cityName) || null
     };
 }
@@ -349,6 +361,7 @@ function purgeEvent(code, endPayload) {
 
     for (const res of sessions[code] || []) sseEnd(res, endPayload);
     closeOrgStreams(code, { type: "revoked", reason: "banned" });
+    closeDemo(code, { type: "revoked", reason: "banned" });
     for (const [ticket, v] of streamTickets) {
         if (v.code === code) streamTickets.delete(ticket);
     }
@@ -560,24 +573,35 @@ app.post("/streamTicket", async function (req, res) {
     return res.status(200).json({ ticket });
 });
 
-app.get("/orgStream", async function (req, res) {
+// Spends a stream ticket. Sends the error response itself and returns null on failure,
+// otherwise returns the organizer's code.
+function redeemTicket(req, res) {
     const ticket = req.query.ticket != null ? String(req.query.ticket) : "";
     const entry = ticket ? streamTickets.get(ticket) : undefined;
     if (entry) streamTickets.delete(ticket);
     if (!entry || entry.expires <= Date.now()) {
-        return res.status(401).json({ error: "Invalid or expired stream ticket" });
+        res.status(401).json({ error: "Invalid or expired stream ticket" });
+        return null;
     }
     const code = entry.code;
     // The event may have been banned, purged and re-issued, or replaced since the ticket was issued.
     const token = getToken(code);
     if (!token || token.slack !== entry.slack || token.password !== entry.password || isBanned(token.slack)) {
-        return res.status(401).json({ error: "Invalid event code or password" });
+        res.status(401).json({ error: "Invalid event code or password" });
+        return null;
     }
+    return code;
+}
+
+app.get("/orgStream", async function (req, res) {
+    const code = redeemTicket(req, res);
+    if (code == null) return;
 
     openSSE(res);
     if (!orgStreams.has(code)) orgStreams.set(code, new Set());
     orgStreams.get(code).add(res);
     sseWrite(res, { type: "state", reason: "connected", state: mergeState(code) });
+    sseWrite(res, { type: "demo", demo: demoState(code) });
 
     res.on("close", () => {
         const set = orgStreams.get(code);
@@ -695,6 +719,314 @@ app.post("/unmerge", async function (req, res) {
     return res.status(200).json(mergeState(code));
 });
 
+// --- Demo time (participant screenshare) ---
+//
+// The video itself travels peer-to-peer over WebRTC, presenter laptop -> projector tab. This
+// server only decides who may present and relays the few KB of handshake text between them:
+//   projector tab  : organizer credentials -> /streamTicket -> /screenStream (SSE down), /demoSignal (up)
+//   presenter      : screen code from the projector -> /demoJoin -> /demoStream (SSE down), /demoSignal (up)
+// Every organizer console also gets { type: "demo", demo } on its /orgStream.
+
+const DEMO_GRACE = 15 * 1000;          // a presenter whose stream dropped may reconnect this long
+const DEMO_PENDING_TTL = 90 * 1000;    // time to pick a window after the code was accepted
+const DEMO_SIGNAL_MAX = 32 * 1024;
+const DEMO_NAME_MAX = 40;
+
+// STUN finds a direct path; venues that isolate wifi clients need a TURN relay as well.
+// ICE_SERVERS is a JSON array of RTCIceServer objects.
+let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+if (process.env.ICE_SERVERS) {
+    try {
+        const parsed = JSON.parse(process.env.ICE_SERVERS);
+        if (Array.isArray(parsed)) iceServers = parsed;
+    } catch (e) {
+        console.error("Ignoring ICE_SERVERS: not valid JSON");
+    }
+}
+
+function getDemo(code) {
+    let d = demos.get(code);
+    if (!d) {
+        d = { enabled: false, board: true, screenCode: null, screen: null, presenter: null };
+        demos.set(code, d);
+    }
+    return d;
+}
+
+function newScreenCode() {
+    return String(crypto.randomInt(0, 10000)).padStart(4, "0");
+}
+
+// What organizers and the projector see. The presenter's token never leaves this file.
+function demoState(code) {
+    const d = demos.get(code);
+    if (!d) return { enabled: false, board: true, screenCode: null, screenOpen: false, presenter: null };
+    return {
+        enabled: d.enabled,
+        board: d.board,
+        screenCode: d.enabled ? d.screenCode : null,
+        screenOpen: !!d.screen,
+        presenter: d.presenter ? { id: d.presenter.id, name: d.presenter.name, live: !!d.presenter.res } : null
+    };
+}
+
+function notifyDemo(code) {
+    const payload = { type: "demo", demo: demoState(code) };
+    for (const res of orgStreams.get(code) || []) sseWrite(res, payload);
+    const d = demos.get(code);
+    if (d && d.screen) sseWrite(d.screen, payload);
+}
+
+function endPresenter(code, reason) {
+    const d = demos.get(code);
+    const p = d && d.presenter;
+    if (!p) return;
+    // Cleared before the stream is ended: ending it fires the stream's own close handler.
+    d.presenter = null;
+    clearTimeout(p.timer);
+    if (p.res) sseEnd(p.res, { type: "ended", reason });
+    notifyDemo(code);
+}
+
+function closeDemo(code, payload) {
+    const d = demos.get(code);
+    if (!d) return;
+    endPresenter(code, "closed");
+    demos.delete(code);
+    if (d.screen) sseEnd(d.screen, payload);
+}
+
+// Decides what happens when someone enters a valid screen code while `current` is already on
+// (or about to be on) the projector. Return "replace" to hand the screen to `incoming`, or
+// "reject" to keep `current`. `current` is { id, name, res } (res is null until they've
+// picked a window); `incoming` is { name }.
+// Whoever is on screen keeps it until they stop or an organizer stops them, so nobody can be
+// cut off mid-demo by the next person in line. Someone who took the code but never picked a
+// window is holding the slot without using it, so the next valid code takes over.
+function admitPresenter(current, incoming) {
+    return current.res ? "reject" : "replace";
+}
+
+// Wrong screen codes, per caller and per event, within the last minute. Four digits are only
+// safe if guessing is slow.
+const DEMO_FAIL_WINDOW = 60 * 1000;
+let demoFailures = new Map();   // key -> [timestamps]
+
+function recentFailures(key) {
+    const now = Date.now();
+    const list = (demoFailures.get(key) || []).filter(t => now - t < DEMO_FAIL_WINDOW);
+    if (list.length) demoFailures.set(key, list);
+    else demoFailures.delete(key);
+    return list;
+}
+
+setInterval(() => {
+    for (const key of [...demoFailures.keys()]) recentFailures(key);
+}, DEMO_FAIL_WINDOW).unref();
+
+function demoPresenter(code, token) {
+    const d = demos.get(String(code ?? ""));
+    const p = d && d.presenter;
+    return p && safeEqual(p.token, token) ? p : null;
+}
+
+function validSignal(signal) {
+    if (!signal || typeof signal !== "object" || Array.isArray(signal)) return false;
+    try {
+        return JSON.stringify(signal).length <= DEMO_SIGNAL_MAX;
+    } catch (e) {
+        return false;
+    }
+}
+
+app.post("/demoState", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    return res.status(200).json({ demo: demoState(code) });
+});
+
+app.post("/demoSet", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const { enabled, board } = req.body;
+    if ((enabled != null && typeof enabled !== "boolean") || (board != null && typeof board !== "boolean") ||
+        (enabled == null && board == null)) {
+        return res.status(400).json({ error: "Send enabled and/or board as true or false" });
+    }
+
+    const d = getDemo(code);
+    if (board != null && d.board !== board) {
+        d.board = board;
+        notifyDemo(code);
+        logAs(code, `Turned the big screen board ${board ? "on" : "off"}`);
+    }
+    if (enabled != null && d.enabled !== enabled) {
+        d.enabled = enabled;
+        d.screenCode = enabled ? newScreenCode() : null;
+        if (!enabled) endPresenter(code, "demos_off");
+        pushToParticipants([code]);
+        notifyDemo(code);
+        logAs(code, `Turned demo time ${enabled ? "on" : "off"}`);
+    }
+    return res.status(200).json({ demo: demoState(code) });
+});
+
+app.post("/demoStop", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const d = demos.get(code);
+    if (d && d.presenter) {
+        logAs(code, `Stopped ${d.presenter.name}'s screenshare`);
+        endPresenter(code, "stopped");
+    }
+    return res.status(200).json({ demo: demoState(code) });
+});
+
+// The projector tab. One per event: opening a second one takes over from the first.
+app.get("/screenStream", async function (req, res) {
+    const code = redeemTicket(req, res);
+    if (code == null) return;
+
+    const d = getDemo(code);
+    const previous = d.screen;
+    d.screen = res;
+    if (previous) sseEnd(previous, { type: "replaced" });
+
+    openSSE(res);
+    sseWrite(res, { type: "hello", iceServers });
+    notifyDemo(code);
+    // A presenter who was already live has to shake hands again with this new tab.
+    if (d.presenter && d.presenter.res) sseWrite(d.presenter.res, { type: "ready", restart: true });
+
+    res.on("close", () => {
+        const now = demos.get(code);
+        if (!now || now.screen !== res) return;
+        now.screen = null;
+        notifyDemo(code);
+    });
+});
+
+app.post("/demoJoin", async function (req, res) {
+    const body = req.body || {};
+    const code = body.code != null ? String(body.code) : "";
+    const screenCode = body.screenCode != null ? String(body.screenCode).trim() : "";
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, DEMO_NAME_MAX) : "";
+    if (!code || !screenCode || !name) {
+        return res.status(400).json({ error: "Enter your name and the code on the big screen." });
+    }
+    const token = getToken(code);
+    if (!token || isBanned(token.slack)) {
+        return res.status(404).json({ error: "No event found" });
+    }
+    const d = demos.get(code);
+    if (!d || !d.enabled) {
+        return res.status(409).json({ error: "Demo time isn't on right now." });
+    }
+    if (!d.screen) {
+        return res.status(409).json({ error: "The big screen isn't connected yet. Ask an organizer." });
+    }
+
+    const callerKey = `${code}|${req.ip}`;
+    if (recentFailures(callerKey).length >= 5 || recentFailures(code).length >= 30) {
+        return res.status(429).json({ error: "Too many wrong codes. Wait a minute and try again." });
+    }
+    if (!safeEqual(d.screenCode, screenCode)) {
+        for (const key of [callerKey, code]) {
+            demoFailures.set(key, [...recentFailures(key), Date.now()]);
+        }
+        return res.status(401).json({ error: "That's not the code on the big screen." });
+    }
+
+    if (d.presenter) {
+        if (admitPresenter(d.presenter, { name }) !== "replace") {
+            return res.status(409).json({ error: `${d.presenter.name} is on the big screen right now.` });
+        }
+        endPresenter(code, "replaced");
+    }
+
+    const presenter = {
+        id: crypto.randomBytes(6).toString("hex"),
+        name,
+        token: crypto.randomBytes(32).toString("hex"),
+        res: null,
+        timer: null
+    };
+    presenter.timer = setTimeout(() => {
+        if (d.presenter === presenter) endPresenter(code, "timeout");
+    }, DEMO_PENDING_TTL);
+    d.presenter = presenter;
+    // A code is good for one presenter: the next person has to read the new one off the screen.
+    d.screenCode = newScreenCode();
+    notifyDemo(code);
+    logAs(code, `${name} joined demo time`);
+    return res.status(200).json({ token: presenter.token, iceServers });
+});
+
+// The presenter's feed: { type: "ready", restart } (start or redo the handshake),
+// { type: "signal", signal } and { type: "ended", reason }.
+app.get("/demoStream", async function (req, res) {
+    const code = req.query.code != null ? String(req.query.code) : "";
+    const p = demoPresenter(code, req.query.token);
+    if (!p) {
+        return res.status(401).json({ error: "This screenshare has ended" });
+    }
+    const d = demos.get(code);
+    const stale = p.res;
+    p.res = res;
+    if (stale) sseEnd(stale);
+    clearTimeout(p.timer);
+
+    openSSE(res);
+    if (d.screen) sseWrite(res, { type: "ready", restart: false });
+    notifyDemo(code);
+
+    res.on("close", () => {
+        if (p.res !== res) return;
+        p.res = null;
+        const now = demos.get(code);
+        if (!now || now.presenter !== p) return;
+        // Wifi blips shouldn't end a demo: the video is peer-to-peer and may well still be playing.
+        p.timer = setTimeout(() => {
+            if (now.presenter === p && !p.res) endPresenter(code, "lost");
+        }, DEMO_GRACE);
+        notifyDemo(code);
+    });
+});
+
+app.post("/demoLeave", async function (req, res) {
+    const body = req.body || {};
+    const code = body.code != null ? String(body.code) : "";
+    if (demoPresenter(code, body.token)) endPresenter(code, "left");
+    return res.status(200).json({ message: "Left" });
+});
+
+// Relays one handshake message. A presenter proves themselves with their token; anything
+// else must be the projector tab, which holds organizer credentials.
+app.post("/demoSignal", async function (req, res) {
+    const body = req.body || {};
+    if (!validSignal(body.signal)) {
+        return res.status(400).json({ error: "Invalid signal" });
+    }
+
+    if (body.token != null) {
+        const code = body.code != null ? String(body.code) : "";
+        const p = demoPresenter(code, body.token);
+        if (!p) return res.status(401).json({ error: "This screenshare has ended" });
+        const d = demos.get(code);
+        if (d.screen) sseWrite(d.screen, { type: "signal", from: p.id, signal: body.signal });
+        return res.status(200).json({ delivered: !!d.screen });
+    }
+
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const d = demos.get(code);
+    const p = d && d.presenter;
+    // `to` stops an answer meant for the last presenter reaching the next one.
+    const delivered = !!(p && p.res && p.id === body.to);
+    if (delivered) sseWrite(p.res, { type: "signal", signal: body.signal });
+    return res.status(200).json({ delivered });
+});
+
 // --- Admin ---
 
 // The read-only endpoints below take credentials in a POST body. GET (credentials in the
@@ -738,6 +1070,9 @@ app.post("/setEvents", async function (req, res) {
     }
     for (const c of [...orgStreams.keys()]) {
         closeOrgStreams(c, { type: "reset", message: "Events database replaced by administrator" });
+    }
+    for (const c of [...demos.keys()]) {
+        closeDemo(c, { type: "reset", message: "Events database replaced by administrator" });
     }
 
     tokens = parsed;
