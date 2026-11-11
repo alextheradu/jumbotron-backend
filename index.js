@@ -10,6 +10,7 @@ admins = admins.split(";");
 let banned = [];
 let bridgeRequests = [];
 let bridgeConnections = {}; // Track active SSE response streams separately
+let orgSessions = [];       // Track active global/org update SSE streams
 
 const app = express();
 app.use(express.json());
@@ -73,6 +74,15 @@ function getGroupSessions(code) {
         }
     }
     return activeSessions;
+}
+
+function broadcastOrgUpdate(eventPayload) {
+    let payloadStr = JSON.stringify(eventPayload);
+    for (let clientRes of orgSessions) {
+        try {
+            clientRes.write(`data: ${payloadStr}\n\n`);
+        } catch (e) {}
+    }
 }
 
 // --- Express Routes ---
@@ -168,7 +178,6 @@ app.post("/initEvent", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    // Block bridged events from initializing/setting event location
     if (tokens[code].bridge) {
         return res.status(400).json({ error: "Bridged events cannot initialize events; only root events can set location." });
     }
@@ -278,6 +287,35 @@ app.get("/getSession", async function(req, res) {
 
     res.on("close", () => {
         sessions[code] = sessions[code].filter(x => x != res);
+    });
+});
+
+// --- Org Update SSE Endpoint ---
+app.get("/getOrgUpdates", async function(req, res) {
+    const { code, password } = req.query;
+    if (!code || !password) {
+        return res.status(400).json({error: "Missing parameters"});
+    }
+    if (!tokens[code] || tokens[code].password != password) {
+        res.status(401).json({error: "Failed to authenticate"})
+    }
+    if (banned.indexOf(tokens[code].slack) != -1) {
+        return res.status(401).json({ error: "Banned user" });
+    }
+
+
+    res.set({
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+    });
+    res.flushHeaders();
+
+    orgSessions.push(res);
+    res.write(`data: ${JSON.stringify({ type: "connected", message: "Connected to org updates feed" })}\n\n`);
+
+    res.on("close", () => {
+        orgSessions = orgSessions.filter(x => x != res);
     });
 });
 
@@ -406,11 +444,14 @@ app.post("/ackMergeRequest", async function (req, res) {
             targetConnection.write("data: accepted\n\n");
             targetConnection.end();
         }
+        // Broadcast successful merge update to org clients
+        broadcastOrgUpdate({ type: "merge_accepted", root: code, bridged: recipient, sources: tokens[code].sources });
     } else {
         if (targetConnection) {
             targetConnection.write("data: rejected\n\n");
             targetConnection.end();
         }
+        broadcastOrgUpdate({ type: "merge_rejected", root: code, bridged: recipient });
     }
 
     bridgeRequests = bridgeRequests.filter(x => !(x.recipient == code && x.code == recipient));
@@ -470,6 +511,9 @@ app.post("/unmergeEvents", async function (req, res) {
 
     delete tokens[targetCode].bridge;
 
+    // Broadcast unmerge update to org clients
+    broadcastOrgUpdate({ type: "unmerged", root: root, bridgedCode: targetCode, slack: slack, remainingSources: tokens[root].sources });
+
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unmerged ${targetCode} from ${root}`);
     return res.status(200).json({ message: "Successfully unmerged events" });
 });
@@ -527,6 +571,9 @@ app.post("/setEvents", async function (req, res) {
         sessions[jumbotronCode] = [];
     }
 
+    // Broadcast admin database reset to org update clients
+    broadcastOrgUpdate({ type: "admin_reset", message: "Events database replaced by administrator" });
+
     return res.status(200).json({ message: "Updated events, closed all active sessions, and reset packets successfully." });
 });
 
@@ -568,6 +615,7 @@ app.post("/banEvent", async function (req, res) {
         let targetSlack = banSlack.trim();
         console.log(tokenLog(tokens[code].slack, tokens[code].name), `Banned and purged Slack ID ${targetSlack}`);
         banUserBySlack(targetSlack);
+        broadcastOrgUpdate({ type: "user_banned", slack: targetSlack });
         return res.status(200).json({ message: `Slack ID ${targetSlack} has been banned and terminated.` });
     } else if (banList) {
         banned = banList;
@@ -575,6 +623,7 @@ app.post("/banEvent", async function (req, res) {
             banUserBySlack(targetSlack);
         }
         console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ban list and purged active events`);
+        broadcastOrgUpdate({ type: "ban_list_updated", banned: banned });
         return res.status(200).json({ message: `Ban list updated and active sessions terminated.` });
     }
 });
@@ -593,6 +642,7 @@ app.post("/unbanEvent", async function (req, res) {
 
     banned = banned.filter(x => x != unbanSlack);
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unbanned ${unbanSlack}`);
+    broadcastOrgUpdate({ type: "user_unbanned", slack: unbanSlack });
     return res.status(200).json({ message: "Unbanned user" });
 });
 
