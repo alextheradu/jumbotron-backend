@@ -53,6 +53,28 @@ function tokenLog(slack, name) {
     return slack + "~" + name;
 }
 
+// --- Helper Functions for Merged Events ---
+
+function getRootCode(code) {
+    if (tokens[code] && tokens[code].bridge) {
+        return tokens[code].bridge;
+    }
+    return code;
+}
+
+function getGroupSessions(code) {
+    const rootCode = getRootCode(code);
+    let activeSessions = [...(sessions[rootCode] || [])];
+    
+    // Include sessions from all events bridged to this root
+    for (let [c, t] of Object.entries(tokens)) {
+        if (t.bridge === rootCode && sessions[c]) {
+            activeSessions.push(...sessions[c]);
+        }
+    }
+    return activeSessions;
+}
+
 // --- Express Routes ---
 
 app.post("/genToken", async function(req, res) {
@@ -122,7 +144,7 @@ app.post("/genToken", async function(req, res) {
     newToken.name = scopes.first_name;
     newToken.slack = scopes.slack_id;
     newToken.password = cryptoCode;
-    newToken.sources = []; // Initialize sources array
+    newToken.sources = []; 
     const jumbotronCode = codeGen(newToken);
     sessions[jumbotronCode] = [];
     console.log(tokenLog(newToken.slack, newToken.name), `Generated new code ${jumbotronCode}`);
@@ -146,14 +168,23 @@ app.post("/initEvent", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    tokens[code].cityName = cityName.trim();
+    // Block bridged events from initializing/setting event location
+    if (tokens[code].bridge) {
+        return res.status(400).json({ error: "Bridged events cannot initialize events; only root events can set location." });
+    }
 
-    if (sessions[code].length != 0) {
-        let payload = JSON.stringify({ data: packets[code], cityName: tokens[code].cityName });
-        for (let i = 0; i < sessions[code].length; i++) {
-            sessions[code][i].write(`data: ${payload}\n\n`);
+    tokens[code].cityName = cityName.trim();
+    const rootCode = getRootCode(code);
+    const groupSessions = getGroupSessions(code);
+
+    if (groupSessions.length != 0) {
+        let payload = JSON.stringify({ data: packets[rootCode], cityName: tokens[code].cityName });
+        for (let clientRes of groupSessions) {
+            try {
+                clientRes.write(`data: ${payload}\n\n`);
+            } catch (e) {}
         }
-        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible and broadcast to ${sessions[code].length} users`);
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible and broadcast to ${groupSessions.length} users`);
     } else {
         console.log(tokenLog(tokens[code].slack, tokens[code].name), `Set ${cityName} as location visible`);
     }
@@ -175,19 +206,21 @@ app.post("/sendPacket", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    if (tokens[code].bridge) {
-        packets[tokens[code].bridge] = packet;
-    } else {
-        packets[code] = packet;
-    }
+    const rootCode = getRootCode(code);
+    packets[rootCode] = packet;
 
-    if (sessions[code].length != 0) {
-        let payload = JSON.stringify({ data: packet, cityName: tokens[code].cityName });
-        for (let i = 0; i < sessions[code].length; i++) {
-            sessions[code][i].write(`data: ${payload}\n\n`);
+    const groupSessions = getGroupSessions(code);
+    const cityName = tokens[code].cityName || tokens[rootCode].cityName;
+
+    if (groupSessions.length != 0) {
+        let payload = JSON.stringify({ data: packet, cityName: cityName });
+        for (let clientRes of groupSessions) {
+            try {
+                clientRes.write(`data: ${payload}\n\n`);
+            } catch (e) {}
         }
-        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet} and broadcasted to ${sessions[code].length} users`);
-        return res.status(200).json({ message: `Updated information based on ${packet} and broadcasted to ${sessions[code].length} users` });
+        console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet} and broadcasted to ${groupSessions.length} users`);
+        return res.status(200).json({ message: `Updated information based on ${packet} and broadcasted to ${groupSessions.length} users` });
     } else {
         console.log(tokenLog(tokens[code].slack, tokens[code].name), `Updated information based on ${packet}`);
     }
@@ -201,20 +234,18 @@ app.get("/getPacket", async function (req, res) {
         return res.status(400).json({ error: "Missing event code" });
     }
 
-    let packet = packets[code];
-    if (!packet) {
-        if (tokens[code]) {
-            if (banned.indexOf(tokens[code].slack) != -1) {
-                return res.status(401).json({ error: "Banned user" });
-            }
-            return res.status(200).json({ data: null, cityName: tokens[code].cityName });
-        }
+    if (!tokens[code]) {
         return res.status(400).json({ error: "No event found" });
     }
-    if (tokens[code] && banned.indexOf(tokens[code].slack) != -1) {
+    if (banned.indexOf(tokens[code].slack) != -1) {
         return res.status(401).json({ error: "Banned user" });
     }
-    return res.status(200).json({ data: packet, cityName: tokens[code].cityName });
+
+    const rootCode = getRootCode(code);
+    let packet = packets[rootCode] || null;
+    let cityName = tokens[code].cityName || tokens[rootCode].cityName;
+
+    return res.status(200).json({ data: packet, cityName: cityName });
 });
 
 app.get("/getSession", async function(req, res) {
@@ -237,7 +268,12 @@ app.get("/getSession", async function(req, res) {
     res.flushHeaders();
 
     sessions[code].push(res);
-    let payload = JSON.stringify({ data: packets[code], cityName: tokens[code].cityName });
+    
+    const rootCode = getRootCode(code);
+    let packet = packets[rootCode] || null;
+    let cityName = tokens[code].cityName || tokens[rootCode].cityName;
+
+    let payload = JSON.stringify({ data: packet, cityName: cityName });
     res.write(`data: ${payload}\n\n`);
 
     res.on("close", () => {
@@ -261,12 +297,10 @@ app.get("/mergeRequest", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    // Rule 3: Events already merged to a source can't make new requests
     if (tokens[code].bridge || tokens[destination].bridge) {
         return res.status(400).json({ error: "Either this event or the target event is not a root and already has a merge source" });
     }
 
-    // Rule 1: Users with current outgoing requests can't make new requests
     let existingOutgoing = bridgeRequests.some(x => x.code == code);
     if (existingOutgoing) {
         return res.status(400).json({ error: "You already have an active outgoing merge request. Cancel or complete it first." });
@@ -312,7 +346,6 @@ app.get("/getMergeRequests", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    // Rule 3: Events already merged can't accept/view incoming requests
     let outgoingRequests = bridgeRequests.filter(x => x.code == code);
     if (tokens[code].bridge || outgoingRequests.length != 0) {
         return res.status(400).json({ error: "This event can't accept requests as it's not a root event, or this event has outgoing merge requests" });
@@ -339,7 +372,6 @@ app.post("/ackMergeRequest", async function (req, res) {
         return res.status(401).json({ error: "Banned user" });
     }
 
-    // Rule 3: Events already merged to a source can't accept incoming requests
     if (tokens[code].bridge || tokens[recipient].bridge) {
         return res.status(400).json({ error: "Either this event or the target event is not a root and already has a merge source" });
     }
@@ -349,7 +381,6 @@ app.post("/ackMergeRequest", async function (req, res) {
         return res.status(400).json({ error: "This request wasn't found" });
     }
 
-    // Rule 2: Users with current outgoing requests have those cancelled upon accepting an incoming request
     if (accept === true) {
         let myOutgoingRequests = bridgeRequests.filter(x => x.code == code);
         for (let outReq of myOutgoingRequests) {
@@ -359,7 +390,6 @@ app.post("/ackMergeRequest", async function (req, res) {
                 outConn.end();
             }
         }
-        // Clean up any outgoing requests for this code
         bridgeRequests = bridgeRequests.filter(x => x.code != code);
     }
 
@@ -383,7 +413,6 @@ app.post("/ackMergeRequest", async function (req, res) {
         }
     }
 
-    // Clean up request and connection mapping for the handled incoming request
     bridgeRequests = bridgeRequests.filter(x => !(x.recipient == code && x.code == recipient));
     delete bridgeConnections[recipient];
 
@@ -423,8 +452,7 @@ app.post("/unmergeEvents", async function (req, res) {
         return res.status(400).json({ error: "Root event not found" });
     }
 
-    // Find the event code associated with the given slack ID
-    let targetEntry = Object.entries(tokens).find(([c, t]) => t.slack === slack); // c is code, t is token object
+    let targetEntry = Object.entries(tokens).find(([c, t]) => t.slack === slack);
 
     if (!targetEntry) {
         return res.status(400).json({ error: "Bridged event not found for the given slack ID" });
@@ -432,17 +460,14 @@ app.post("/unmergeEvents", async function (req, res) {
 
     let targetCode = targetEntry[0];
 
-    // Check if the events are actually merged together
     if (tokens[targetCode].bridge !== root || !tokens[root].sources || !tokens[root].sources.includes(slack)) {
         return res.status(400).json({ error: "This event is not actually merged into the specified root event." });
     }
 
-    // Remove the slack ID from root's sources array
     if (tokens[root].sources) {
         tokens[root].sources = tokens[root].sources.filter(x => x != slack);
     }
 
-    // Remove the bridge property from the target event
     delete tokens[targetCode].bridge;
 
     console.log(tokenLog(tokens[code].slack, tokens[code].name), `Unmerged ${targetCode} from ${root}`);
@@ -597,7 +622,7 @@ app.get("/getAdmins", async function (req, res) {
     }
 
     return res.status(200).json({admins: admins});
-})
+});
 
 const port = process.env.PORT || 3000; 
 
