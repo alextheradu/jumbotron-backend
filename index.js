@@ -7,6 +7,7 @@ dotenv.config();
 
 let admins = process.env.ADMINS || "U08EMT46G3V";
 admins = admins.split(";");
+console.log("Set admin list", admins)
 
 let banned = [];
 
@@ -1347,11 +1348,19 @@ async function allEvents(req, res) {
     const code = authAdmin(req, res);
     if (code == null) return;
 
-    let items = JSON.stringify(tokens);
+    let returnList = tokens;
+    
+    for (let i = 0; i < Object.entries(tokens).length; i++) {
+        let code = Object.entries(tokens)[i][0];
+        returnList[code].packet = packets[code];
+    }
+
+    let items = JSON.stringify(returnList);
     logAs(code, "Requested all events through admin");
     return res.status(200).json({ list: items });
 }
 app.route("/allEvents").get(allEvents).post(allEvents);
+
 
 app.post("/setEvents", async function (req, res) {
     const code = authAdmin(req, res);
@@ -1367,12 +1376,21 @@ app.post("/setEvents", async function (req, res) {
     } catch (e) {
         return res.status(400).json({ error: "Invalid JSON format for items" });
     }
-    // Validate before touching live state: a bad import would otherwise 500 every endpoint.
+
+    // Validate before touching live state.
     const problem = validateEvents(parsed);
     if (problem) {
         return res.status(400).json({ error: problem });
     }
+
     logAs(code, "Replaced all events through admin");
+
+    // Extract packets before assigning the event data to tokens.
+    let newPackets = {};
+    for (const [eventCode, event] of Object.entries(parsed)) {
+        newPackets[eventCode] = event.packet ?? null;
+        delete event.packet;
+    }
 
     for (let clientResList of Object.values(sessions)) {
         for (let clientRes of clientResList) {
@@ -1387,20 +1405,26 @@ app.post("/setEvents", async function (req, res) {
     }
 
     tokens = parsed;
+    packets = newPackets;
+
     for (const c of [...harpaOn]) {
         if (!getToken(c)) harpaOn.delete(c);
     }
+
     normalizeMerges();
     mergeRequests.clear();
     streamTickets.clear();
-    packets = {};
     sessions = {};
-    for (let jumbotronCode of Object.keys(tokens)) {
+
+    for (const jumbotronCode of Object.keys(tokens)) {
         sessions[jumbotronCode] = [];
     }
 
-    return res.status(200).json({ message: "Updated events, closed all active sessions, and reset packets successfully." });
+    return res.status(200).json({
+        message: "Updated events, closed all active sessions, and restored packets successfully."
+    });
 });
+
 
 app.post("/banEvent", async function (req, res) {
     const code = authAdmin(req, res);
@@ -1456,7 +1480,6 @@ async function getBans(req, res) {
     const code = authAdmin(req, res);
     if (code == null) return;
 
-    logAs(code, "Requested list of banned users");
     return res.status(200).json({ list: JSON.stringify(banned) });
 }
 app.route("/getBans").get(getBans).post(getBans);
