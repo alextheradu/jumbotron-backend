@@ -766,7 +766,7 @@ if (process.env.ICE_SERVERS) {
 function getDemo(code) {
     let d = demos.get(code);
     if (!d) {
-        d = { enabled: false, board: true, mirror: false, frame: null, screenCode: null, screen: null, presenter: null, queue: [] };
+        d = { enabled: false, board: true, mirror: false, frame: null, screenCode: null, screen: null, presenter: null, queue: [], viewers: new Map() };
         demos.set(code, d);
     }
     return d;
@@ -817,6 +817,7 @@ function endPresenter(code, reason) {
     clearTimeout(p.pickTimer);
     if (p.res) sseEnd(p.res, { type: "ended", reason });
     clearFrame(code);
+    dropViewers(code, "presenter_changed");
     notifyDemo(code);
 }
 
@@ -896,68 +897,22 @@ function validSignal(signal) {
     }
 }
 
-// --- Attendee sign-in (Hack Club Auth, for demo time) ---
+// --- Presenters ---
 //
-// Organizers need a verified, YSWS-eligible account; presenters only need a Hack Club account,
-// so the queue shows a real name and picture. The frontend shares /callback with organizer
-// sign-in and tells the two apart with the OAuth `state`.
+// Presenters aren't signed in: they type a name, and the queue shows it as typed (unverified).
+// `device` is a random id the browser keeps, so a reload doesn't add a second queue entry.
 
-const ATTENDEE_TTL = 12 * 60 * 60 * 1000;
-let attendees = new Map();   // session token -> { id, slack, name, expires }
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [session, a] of attendees) if (a.expires < now) attendees.delete(session);
-}, 10 * 60 * 1000).unref();
-
-function attendeeFor(session) {
-    if (typeof session !== "string" || !session) return null;
-    const a = attendees.get(session);
-    if (!a || a.expires < Date.now()) return null;
-    return a;
-}
-
-function displayName(identity) {
-    const first = typeof identity.first_name === "string" ? identity.first_name.trim() : "";
-    const last = typeof identity.last_name === "string" ? identity.last_name.trim() : "";
-    const name = last ? `${first} ${last[0]}.` : first;
-    return name.slice(0, DEMO_NAME_MAX);
+function cleanName(raw) {
+    return typeof raw === "string" ? raw.replace(/\s+/g, " ").trim().slice(0, DEMO_NAME_MAX) : "";
 }
 
 // Signs a banned person out and takes them off every big screen and queue.
 function kickAttendee(slack) {
-    for (const [session, a] of attendees) if (a.slack === slack) attendees.delete(session);
     for (const [code, d] of demos) {
         if (d.presenter && d.presenter.slack === slack) endPresenter(code, "stopped");
         for (const q of d.queue.filter(q => q.slack === slack)) dropQueued(code, q, "removed");
     }
 }
-
-app.post("/attendeeAuth", async function (req, res) {
-    const { code } = req.body || {};
-    if (!code || typeof code !== "string") {
-        return res.status(400).json({ error: "Missing code" });
-    }
-    let identity;
-    try {
-        identity = await fetchHcaIdentity(code);
-    } catch (e) {
-        return res.status(e.status || 502).json({ error: e.message });
-    }
-    const id = typeof identity.id === "string" && identity.id ? identity.id : identity.slack_id;
-    const name = displayName(identity);
-    if (!id || !name) {
-        return res.status(401).json({ error: "Your Hack Club account is missing a name." });
-    }
-    const slack = typeof identity.slack_id === "string" ? identity.slack_id : null;
-    if (slack && isBanned(slack)) {
-        return res.status(403).json({ error: "Banned user" });
-    }
-    const session = crypto.randomBytes(32).toString("hex");
-    const expires = Date.now() + ATTENDEE_TTL;
-    attendees.set(session, { id, slack, name, expires });
-    return res.status(200).json({ session, name, slack, expires });
-});
 
 app.post("/demoState", async function (req, res) {
     const code = authOrganizer(req, res);
@@ -977,7 +932,10 @@ app.post("/demoSet", async function (req, res) {
     const d = getDemo(code);
     if (mirror != null && d.mirror !== mirror) {
         d.mirror = mirror;
-        if (!mirror) clearFrame(code);
+        if (!mirror) {
+            clearFrame(code);
+            dropViewers(code, "mirror_off");
+        }
         notifyDemo(code);
         logAs(code, `Turned the attendee mirror ${mirror ? "on" : "off"}`);
     }
@@ -988,7 +946,9 @@ app.post("/demoSet", async function (req, res) {
     }
     if (enabled != null && d.enabled !== enabled) {
         d.enabled = enabled;
-        d.screenCode = enabled ? newScreenCode() : null;
+        // One code for the whole event: organizers pick who presents from the queue, so the room
+        // only has to learn it once. demoState() hides it while demo time is off.
+        d.screenCode ??= newScreenCode();
         if (!enabled) {
             endPresenter(code, "demos_off");
             clearQueue(code, "demos_off");
@@ -1054,6 +1014,72 @@ app.get("/demoFrame", async function (req, res) {
     // The URL carries the frame number, so any one frame never changes.
     res.set({ "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=60" });
     return res.status(200).send(d.frame.buf);
+});
+
+// --- Live mirror: real video from the projector tab to attendees ---
+//
+// Attendees who can reach the projector tab get the presenter's screen as live WebRTC video,
+// straight from the projector laptop (no media server, no keys). Each watcher opens
+// /mirrorStream (SSE down) and posts its handshake to /mirrorSignal (up); the projector tab
+// answers through /demoSignal with `viewer` set. The projector uploads one copy per watcher,
+// so the number is capped; anyone past the cap, or whose connection fails, keeps using the
+// JPEG snapshots above.
+
+const VIEWER_MAX = 15;
+
+function mirrorLive(d) {
+    return !!(d && d.enabled && d.mirror && d.screen && isLive(d.presenter));
+}
+
+function dropViewer(code, id, reason) {
+    const d = demos.get(code);
+    const v = d && d.viewers.get(id);
+    if (!v) return;
+    d.viewers.delete(id);
+    if (reason) sseEnd(v, { type: "ended", reason });
+    if (d.screen) sseWrite(d.screen, { type: "viewerLeave", viewer: id });
+}
+
+function dropViewers(code, reason) {
+    const d = demos.get(code);
+    if (!d) return;
+    for (const id of [...d.viewers.keys()]) dropViewer(code, id, reason);
+}
+
+const validViewer = (id) => typeof id === "string" && /^[A-Za-z0-9-]{8,64}$/.test(id);
+
+app.get("/mirrorStream", async function (req, res) {
+    const code = req.query.code != null ? String(req.query.code) : "";
+    const viewer = req.query.viewer;
+    if (!getToken(code) || !validViewer(viewer)) return res.status(400).json({ error: "Bad request" });
+    const d = demos.get(code);
+    if (!mirrorLive(d)) return res.status(409).json({ error: "Nothing is being mirrored" });
+
+    openSSE(res);
+    const previous = d.viewers.get(viewer);
+    if (!previous && d.viewers.size >= VIEWER_MAX) {
+        return sseEnd(res, { type: "full" });
+    }
+    d.viewers.set(viewer, res);
+    if (previous) sseEnd(previous);
+    sseWrite(res, { type: "hello", iceServers });
+    sseWrite(d.screen, { type: "viewerJoin", viewer });
+
+    res.on("close", () => {
+        const now = demos.get(code);
+        if (now && now.viewers.get(viewer) === res) dropViewer(code, viewer);
+    });
+});
+
+// A watcher's handshake message (their offer or ICE candidates) on its way to the projector.
+app.post("/mirrorSignal", async function (req, res) {
+    const body = req.body || {};
+    const code = body.code != null ? String(body.code) : "";
+    const d = getToken(code) ? demos.get(code) : null;
+    if (!validViewer(body.viewer) || !validSignal(body.signal)) return res.status(400).json({ error: "Invalid signal" });
+    if (!d || !d.viewers.has(body.viewer) || !mirrorLive(d)) return res.status(409).json({ delivered: false });
+    sseWrite(d.screen, { type: "viewerSignal", viewer: body.viewer, signal: body.signal });
+    return res.status(200).json({ delivered: true });
 });
 
 app.post("/demoStop", async function (req, res) {
@@ -1135,13 +1161,14 @@ app.get("/screenStream", async function (req, res) {
         const now = demos.get(code);
         if (!now || now.screen !== res) return;
         now.screen = null;
+        dropViewers(code, "screen_gone");
         notifyDemo(code);
     });
 });
 
 const DEMO_QUEUE_MAX = 50;
 
-// Joins the queue. Needs an attendee session (Hack Club sign-in) and the code on the big screen.
+// Joins the queue. Needs a typed name and the code on the big screen.
 app.post("/demoJoin", async function (req, res) {
     const body = req.body || {};
     const code = body.code != null ? String(body.code) : "";
@@ -1149,13 +1176,12 @@ app.post("/demoJoin", async function (req, res) {
     if (!code || !screenCode) {
         return res.status(400).json({ error: "Enter the code on the big screen." });
     }
-    const who = attendeeFor(body.session);
-    if (!who) {
-        return res.status(401).json({ error: "Sign in with Hack Club to share your screen.", signIn: true });
+    const name = cleanName(body.name);
+    if (!name) {
+        return res.status(400).json({ error: "Type your name so organizers know who you are." });
     }
-    if (who.slack && isBanned(who.slack)) {
-        return res.status(403).json({ error: "Banned user" });
-    }
+    const device = typeof body.device === "string" && /^[A-Za-z0-9-]{8,64}$/.test(body.device) ? body.device : `${req.ip}|${name.toLowerCase()}`;
+    const who = { id: device, name, slack: null };
     const token = getToken(code);
     if (!token || isBanned(token.slack)) {
         return res.status(404).json({ error: "No event found" });
@@ -1300,6 +1326,11 @@ app.post("/demoSignal", async function (req, res) {
     const code = authOrganizer(req, res);
     if (code == null) return;
     const d = demos.get(code);
+    if (body.viewer != null) {
+        const v = validViewer(body.viewer) && d ? d.viewers.get(body.viewer) : null;
+        if (v) sseWrite(v, { type: "signal", signal: body.signal });
+        return res.status(200).json({ delivered: !!v });
+    }
     const p = d && d.presenter;
     // `to` stops an answer meant for the last presenter reaching the next one.
     const delivered = !!(p && p.res && p.id === body.to);
