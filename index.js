@@ -12,7 +12,9 @@ let banned = [];
 
 const app = express();
 app.set("trust proxy", "loopback");
-app.use(express.json());
+// /demoFrame carries a JPEG in its JSON body, so it gets its own, larger limit (see below).
+const parseJson = express.json();
+app.use((req, res, next) => (req.path === "/demoFrame" ? next() : parseJson(req, res, next)));
 app.use(cors({
     origin: [
         "https://symmetrical-doodle-69qgr7v97j76f59j7-5173.app.github.dev",
@@ -38,9 +40,13 @@ let mergeRequests = new Map();   // requesterCode -> { from, to, createdAt }
 let orgStreams = new Map();      // organizer code -> Set<res> (the /orgStream SSE feeds)
 // Demo time (participant screenshare), keyed by the event's own code: every venue has its own
 // projector, so merged events still present separately.
-//   demos.get(code) = { enabled, board, screenCode, screen: res|null, presenter: null | { id, name, token, res, timer } }
+//   demos.get(code) = { enabled, board, screenCode, screen: res|null, presenter: entry|null, queue: [entry] }
+//   entry = { id, who, name, slack, token, res, timer, pickTimer, picked }
 //   `board` shows the announcement and up next on the big screen; off, it only carries demos.
 let demos = new Map();
+// Events whose big screen shows harpa (hackclub/harpa, embedded). Keyed by the event's own code
+// like demo time: every venue has its own projector.
+let harpaOn = new Set();
 
 function codeGen(token) {
     let code = randomGen();
@@ -281,6 +287,7 @@ function participantPayload(code) {
     return {
         data: packets[root] ?? null,
         demos: !!(demos.get(code) && demos.get(code).enabled),
+        mirror: mirrorState(code),
         cityName: (tokens[root] && tokens[root].cityName) || (tokens[code] && tokens[code].cityName) || null
     };
 }
@@ -362,6 +369,7 @@ function purgeEvent(code, endPayload) {
     for (const res of sessions[code] || []) sseEnd(res, endPayload);
     closeOrgStreams(code, { type: "revoked", reason: "banned" });
     closeDemo(code, { type: "revoked", reason: "banned" });
+    harpaOn.delete(code);
     for (const [ticket, v] of streamTickets) {
         if (v.code === code) streamTickets.delete(ticket);
     }
@@ -388,46 +396,56 @@ if (process.env.SEED_FILE) {
 
 // --- Express Routes ---
 
-app.post("/genToken", async function(req, res) {
-    const { code } = req.body || {};
-    if (!code || typeof code !== "string") {
-        return res.status(400).json({ error: "Missing code" });
-    }
-
-    let reqBody = {
-        "client_id": clientID,
-        "client_secret": process.env.CLIENT_SECRET,
-        "redirect_uri": process.env.REDIRECT,
-        "code": code,
-        "grant_type": "authorization_code"
-    };
-    let scopes;
+// Trades a Hack Club Auth authorization code for the account's identity. Throws an Error with
+// `status` (401: auth refused, 502: Hack Club Auth unreachable) and a message for the user.
+async function fetchHcaIdentity(code) {
+    const fail = (status, message) => Object.assign(new Error(message), { status });
+    let response, response2;
     try {
-        const response = await fetch("https://auth.hackclub.com/oauth/token", {
+        response = await fetch("https://auth.hackclub.com/oauth/token", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(reqBody)
+            body: JSON.stringify({
+                "client_id": clientID,
+                "client_secret": process.env.CLIENT_SECRET,
+                "redirect_uri": process.env.REDIRECT,
+                "code": code,
+                "grant_type": "authorization_code"
+            })
         });
-        if (!response.ok) {
-            return res.status(401).json({ error: "Initial auth request failed" });
-        }
+        if (!response.ok) throw fail(401, "Initial auth request failed");
         const data = await response.json();
 
-        const response2 = await fetch("https://auth.hackclub.com/api/v1/me", {
+        response2 = await fetch("https://auth.hackclub.com/api/v1/me", {
             method: "GET",
             headers: {
                 Authorization: `Bearer ${data.access_token}`,
                 "Content-Type": "application/json"
             }
         });
-        if (!response2.ok) {
-            return res.status(401).json({ error: "Information request failed" });
-        }
-        const prescopes = await response2.json();
-        scopes = prescopes && prescopes.identity;
+        if (!response2.ok) throw fail(401, "Information request failed");
+        const me = await response2.json();
+        const identity = me && me.identity;
+        if (!identity || typeof identity !== "object") throw fail(401, "Auth response missing identity");
+        return identity;
     } catch (e) {
+        if (e.status) throw e;
         console.error("Auth provider request failed:", e);
-        return res.status(502).json({ error: "Could not reach Hack Club Auth, try again soon" });
+        throw fail(502, "Could not reach Hack Club Auth, try again soon");
+    }
+}
+
+app.post("/genToken", async function(req, res) {
+    const { code } = req.body || {};
+    if (!code || typeof code !== "string") {
+        return res.status(400).json({ error: "Missing code" });
+    }
+
+    let scopes;
+    try {
+        scopes = await fetchHcaIdentity(code);
+    } catch (e) {
+        return res.status(e.status || 502).json({ error: e.message });
     }
     if (!scopes || typeof scopes.slack_id !== "string" || !scopes.slack_id) {
         return res.status(401).json({ error: "Auth response missing identity" });
@@ -602,6 +620,7 @@ app.get("/orgStream", async function (req, res) {
     orgStreams.get(code).add(res);
     sseWrite(res, { type: "state", reason: "connected", state: mergeState(code) });
     sseWrite(res, { type: "demo", demo: demoState(code) });
+    sseWrite(res, { type: "harpa", harpa: harpaState(code) });
 
     res.on("close", () => {
         const set = orgStreams.get(code);
@@ -747,7 +766,7 @@ if (process.env.ICE_SERVERS) {
 function getDemo(code) {
     let d = demos.get(code);
     if (!d) {
-        d = { enabled: false, board: true, screenCode: null, screen: null, presenter: null };
+        d = { enabled: false, board: true, mirror: false, frame: null, screenCode: null, screen: null, presenter: null, queue: [] };
         demos.set(code, d);
     }
     return d;
@@ -757,16 +776,22 @@ function newScreenCode() {
     return String(crypto.randomInt(0, 10000)).padStart(4, "0");
 }
 
-// What organizers and the projector see. The presenter's token never leaves this file.
+// A presenter is "live" once they've picked a window and their feed is connected.
+const isLive = (p) => !!(p && p.picked && p.res);
+
+// What organizers and the projector see. Tokens never leave this file.
 function demoState(code) {
     const d = demos.get(code);
-    if (!d) return { enabled: false, board: true, screenCode: null, screenOpen: false, presenter: null };
+    if (!d) return { enabled: false, board: true, mirror: false, screenCode: null, screenOpen: false, presenter: null, queue: [] };
+    const p = d.presenter;
     return {
         enabled: d.enabled,
         board: d.board,
+        mirror: d.mirror,
         screenCode: d.enabled ? d.screenCode : null,
         screenOpen: !!d.screen,
-        presenter: d.presenter ? { id: d.presenter.id, name: d.presenter.name, live: !!d.presenter.res } : null
+        presenter: p ? { id: p.id, name: p.name, slack: p.slack, picked: p.picked, live: isLive(p) } : null,
+        queue: d.queue.map(q => ({ id: q.id, name: q.name, slack: q.slack, connected: !!q.res }))
     };
 }
 
@@ -774,7 +799,12 @@ function notifyDemo(code) {
     const payload = { type: "demo", demo: demoState(code) };
     for (const res of orgStreams.get(code) || []) sseWrite(res, payload);
     const d = demos.get(code);
-    if (d && d.screen) sseWrite(d.screen, payload);
+    if (!d) return;
+    if (d.screen) sseWrite(d.screen, payload);
+    // Everyone waiting sees their place in line move.
+    d.queue.forEach((q, i) => {
+        if (q.res) sseWrite(q.res, { type: "queued", position: i + 1 });
+    });
 }
 
 function endPresenter(code, reason) {
@@ -784,7 +814,32 @@ function endPresenter(code, reason) {
     // Cleared before the stream is ended: ending it fires the stream's own close handler.
     d.presenter = null;
     clearTimeout(p.timer);
+    clearTimeout(p.pickTimer);
     if (p.res) sseEnd(p.res, { type: "ended", reason });
+    clearFrame(code);
+    notifyDemo(code);
+}
+
+function dropQueued(code, entry, reason) {
+    const d = demos.get(code);
+    if (!d) return;
+    const i = d.queue.indexOf(entry);
+    if (i === -1) return;
+    d.queue.splice(i, 1);
+    clearTimeout(entry.timer);
+    if (entry.res) sseEnd(entry.res, { type: "ended", reason });
+    notifyDemo(code);
+}
+
+function clearQueue(code, reason) {
+    const d = demos.get(code);
+    if (!d) return;
+    const waiting = d.queue;
+    d.queue = [];
+    for (const q of waiting) {
+        clearTimeout(q.timer);
+        if (q.res) sseEnd(q.res, { type: "ended", reason });
+    }
     notifyDemo(code);
 }
 
@@ -792,19 +847,16 @@ function closeDemo(code, payload) {
     const d = demos.get(code);
     if (!d) return;
     endPresenter(code, "closed");
+    clearQueue(code, "closed");
     demos.delete(code);
     if (d.screen) sseEnd(d.screen, payload);
 }
 
-// Decides what happens when someone enters a valid screen code while `current` is already on
-// (or about to be on) the projector. Return "replace" to hand the screen to `incoming`, or
-// "reject" to keep `current`. `current` is { id, name, res } (res is null until they've
-// picked a window); `incoming` is { name }.
-// Whoever is on screen keeps it until they stop or an organizer stops them, so nobody can be
-// cut off mid-demo by the next person in line. Someone who took the code but never picked a
-// window is holding the slot without using it, so the next valid code takes over.
-function admitPresenter(current, incoming) {
-    return current.res ? "reject" : "replace";
+// Approving someone while `current` is approved hands them the screen: the organizer's click is
+// the decision, so `current` is ended (they're told the screen went to someone else).
+// Return "reject" instead to keep `current` and tell the organizer to stop them first.
+function approveWhileBusy(current) {
+    return "replace";
 }
 
 // Wrong screen codes, per caller and per event, within the last minute. Four digits are only
@@ -830,6 +882,11 @@ function demoPresenter(code, token) {
     return p && safeEqual(p.token, token) ? p : null;
 }
 
+function demoQueued(code, token) {
+    const d = demos.get(String(code ?? ""));
+    return (d && d.queue.find(q => safeEqual(q.token, token))) || null;
+}
+
 function validSignal(signal) {
     if (!signal || typeof signal !== "object" || Array.isArray(signal)) return false;
     try {
@@ -838,6 +895,69 @@ function validSignal(signal) {
         return false;
     }
 }
+
+// --- Attendee sign-in (Hack Club Auth, for demo time) ---
+//
+// Organizers need a verified, YSWS-eligible account; presenters only need a Hack Club account,
+// so the queue shows a real name and picture. The frontend shares /callback with organizer
+// sign-in and tells the two apart with the OAuth `state`.
+
+const ATTENDEE_TTL = 12 * 60 * 60 * 1000;
+let attendees = new Map();   // session token -> { id, slack, name, expires }
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [session, a] of attendees) if (a.expires < now) attendees.delete(session);
+}, 10 * 60 * 1000).unref();
+
+function attendeeFor(session) {
+    if (typeof session !== "string" || !session) return null;
+    const a = attendees.get(session);
+    if (!a || a.expires < Date.now()) return null;
+    return a;
+}
+
+function displayName(identity) {
+    const first = typeof identity.first_name === "string" ? identity.first_name.trim() : "";
+    const last = typeof identity.last_name === "string" ? identity.last_name.trim() : "";
+    const name = last ? `${first} ${last[0]}.` : first;
+    return name.slice(0, DEMO_NAME_MAX);
+}
+
+// Signs a banned person out and takes them off every big screen and queue.
+function kickAttendee(slack) {
+    for (const [session, a] of attendees) if (a.slack === slack) attendees.delete(session);
+    for (const [code, d] of demos) {
+        if (d.presenter && d.presenter.slack === slack) endPresenter(code, "stopped");
+        for (const q of d.queue.filter(q => q.slack === slack)) dropQueued(code, q, "removed");
+    }
+}
+
+app.post("/attendeeAuth", async function (req, res) {
+    const { code } = req.body || {};
+    if (!code || typeof code !== "string") {
+        return res.status(400).json({ error: "Missing code" });
+    }
+    let identity;
+    try {
+        identity = await fetchHcaIdentity(code);
+    } catch (e) {
+        return res.status(e.status || 502).json({ error: e.message });
+    }
+    const id = typeof identity.id === "string" && identity.id ? identity.id : identity.slack_id;
+    const name = displayName(identity);
+    if (!id || !name) {
+        return res.status(401).json({ error: "Your Hack Club account is missing a name." });
+    }
+    const slack = typeof identity.slack_id === "string" ? identity.slack_id : null;
+    if (slack && isBanned(slack)) {
+        return res.status(403).json({ error: "Banned user" });
+    }
+    const session = crypto.randomBytes(32).toString("hex");
+    const expires = Date.now() + ATTENDEE_TTL;
+    attendees.set(session, { id, slack, name, expires });
+    return res.status(200).json({ session, name, slack, expires });
+});
 
 app.post("/demoState", async function (req, res) {
     const code = authOrganizer(req, res);
@@ -848,13 +968,19 @@ app.post("/demoState", async function (req, res) {
 app.post("/demoSet", async function (req, res) {
     const code = authOrganizer(req, res);
     if (code == null) return;
-    const { enabled, board } = req.body;
+    const { enabled, board, mirror } = req.body;
     if ((enabled != null && typeof enabled !== "boolean") || (board != null && typeof board !== "boolean") ||
-        (enabled == null && board == null)) {
-        return res.status(400).json({ error: "Send enabled and/or board as true or false" });
+        (mirror != null && typeof mirror !== "boolean") || (enabled == null && board == null && mirror == null)) {
+        return res.status(400).json({ error: "Send enabled, board and/or mirror as true or false" });
     }
 
     const d = getDemo(code);
+    if (mirror != null && d.mirror !== mirror) {
+        d.mirror = mirror;
+        if (!mirror) clearFrame(code);
+        notifyDemo(code);
+        logAs(code, `Turned the attendee mirror ${mirror ? "on" : "off"}`);
+    }
     if (board != null && d.board !== board) {
         d.board = board;
         notifyDemo(code);
@@ -863,12 +989,71 @@ app.post("/demoSet", async function (req, res) {
     if (enabled != null && d.enabled !== enabled) {
         d.enabled = enabled;
         d.screenCode = enabled ? newScreenCode() : null;
-        if (!enabled) endPresenter(code, "demos_off");
+        if (!enabled) {
+            endPresenter(code, "demos_off");
+            clearQueue(code, "demos_off");
+        }
         pushToParticipants([code]);
         notifyDemo(code);
         logAs(code, `Turned demo time ${enabled ? "on" : "off"}`);
     }
     return res.status(200).json({ demo: demoState(code) });
+});
+
+// --- Demo mirror: the presenter's screen on attendees' devices ---
+//
+// The video only travels presenter -> projector (WebRTC, one viewer). When an organizer turns
+// `mirror` on, the projector also posts a JPEG snapshot of it to /demoFrame a couple of times a
+// second (only when the picture changed). Attendees on this event's own code are told the frame
+// number over /getSession (`mirror: { name, n }`) and load the image from GET /demoFrame. Plain
+// images work on every phone and network, where venue wifi often blocks device-to-device video.
+
+const FRAME_MAX = 400 * 1024;          // decoded JPEG bytes
+const FRAME_MIN_GAP = 250;             // ms between accepted frames
+
+function mirrorState(code) {
+    const d = demos.get(code);
+    if (!d || !d.enabled || !d.mirror || !d.frame || !isLive(d.presenter)) return null;
+    return { name: d.presenter.name, n: d.frame.n };
+}
+
+function clearFrame(code) {
+    const d = demos.get(code);
+    if (!d || !d.frame) return;
+    d.frame = null;
+    pushToParticipants([code]);
+}
+
+app.post("/demoFrame", express.json({ limit: "600kb" }), async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const d = demos.get(code);
+    if (!d || !d.enabled || !d.mirror || !isLive(d.presenter)) {
+        return res.status(409).json({ error: "Not mirroring right now" });
+    }
+    const frame = req.body && req.body.frame;
+    if (typeof frame !== "string" || !frame.startsWith("data:image/jpeg;base64,")) {
+        return res.status(400).json({ error: "Send frame as a JPEG data URL" });
+    }
+    const buf = Buffer.from(frame.slice("data:image/jpeg;base64,".length), "base64");
+    if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf.length > FRAME_MAX) {
+        return res.status(400).json({ error: "That frame isn't a JPEG under 400 KB" });
+    }
+    const now = Date.now();
+    if (d.frame && now - d.frame.at < FRAME_MIN_GAP) return res.status(429).json({ error: "Too many frames" });
+    d.frame = { n: (d.frame ? d.frame.n : 0) + 1, buf, at: now };
+    pushToParticipants([code]);
+    return res.status(200).json({ n: d.frame.n });
+});
+
+// Public, like /getSession: anyone with the event code can watch the big screen's demo.
+app.get("/demoFrame", async function (req, res) {
+    const code = req.query.code != null ? String(req.query.code) : "";
+    const d = getToken(code) ? demos.get(code) : null;
+    if (!mirrorState(code)) return res.status(404).json({ error: "Nothing is being mirrored" });
+    // The URL carries the frame number, so any one frame never changes.
+    res.set({ "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=60" });
+    return res.status(200).send(d.frame.buf);
 });
 
 app.post("/demoStop", async function (req, res) {
@@ -878,6 +1063,53 @@ app.post("/demoStop", async function (req, res) {
     if (d && d.presenter) {
         logAs(code, `Stopped ${d.presenter.name}'s screenshare`);
         endPresenter(code, "stopped");
+    }
+    return res.status(200).json({ demo: demoState(code) });
+});
+
+// Hands the big screen to someone in the queue. They still have to pick a window.
+app.post("/demoApprove", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const d = demos.get(code);
+    const entry = d && d.queue.find(q => q.id === String(req.body.id ?? ""));
+    if (!entry) {
+        return res.status(404).json({ error: "They're no longer in the queue." });
+    }
+    if (d.presenter) {
+        if (approveWhileBusy(d.presenter) !== "replace") {
+            return res.status(409).json({ error: `${d.presenter.name} is on the big screen. Stop them first.` });
+        }
+        endPresenter(code, "replaced");
+    }
+
+    d.queue.splice(d.queue.indexOf(entry), 1);
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.picked = false;
+    entry.pickTimer = setTimeout(() => {
+        if (d.presenter === entry && !entry.picked) endPresenter(code, "timeout");
+    }, DEMO_PENDING_TTL);
+    d.presenter = entry;
+    if (entry.res) sseWrite(entry.res, { type: "approved" });
+    // If their feed is down right now, the grace timer that was dropping them from the queue
+    // now ends their turn instead.
+    else entry.timer = setTimeout(() => {
+        if (d.presenter === entry && !entry.res) endPresenter(code, "lost");
+    }, DEMO_GRACE);
+    notifyDemo(code);
+    logAs(code, `Approved ${entry.name} for the big screen`);
+    return res.status(200).json({ demo: demoState(code) });
+});
+
+app.post("/demoRemove", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const d = demos.get(code);
+    const entry = d && d.queue.find(q => q.id === String(req.body.id ?? ""));
+    if (entry) {
+        dropQueued(code, entry, "removed");
+        logAs(code, `Removed ${entry.name} from the demo queue`);
     }
     return res.status(200).json({ demo: demoState(code) });
 });
@@ -894,9 +1126,10 @@ app.get("/screenStream", async function (req, res) {
 
     openSSE(res);
     sseWrite(res, { type: "hello", iceServers });
+    sseWrite(res, { type: "harpa", harpa: harpaState(code) });
     notifyDemo(code);
     // A presenter who was already live has to shake hands again with this new tab.
-    if (d.presenter && d.presenter.res) sseWrite(d.presenter.res, { type: "ready", restart: true });
+    if (isLive(d.presenter)) sseWrite(d.presenter.res, { type: "ready", restart: true });
 
     res.on("close", () => {
         const now = demos.get(code);
@@ -906,13 +1139,22 @@ app.get("/screenStream", async function (req, res) {
     });
 });
 
+const DEMO_QUEUE_MAX = 50;
+
+// Joins the queue. Needs an attendee session (Hack Club sign-in) and the code on the big screen.
 app.post("/demoJoin", async function (req, res) {
     const body = req.body || {};
     const code = body.code != null ? String(body.code) : "";
     const screenCode = body.screenCode != null ? String(body.screenCode).trim() : "";
-    const name = typeof body.name === "string" ? body.name.trim().slice(0, DEMO_NAME_MAX) : "";
-    if (!code || !screenCode || !name) {
-        return res.status(400).json({ error: "Enter your name and the code on the big screen." });
+    if (!code || !screenCode) {
+        return res.status(400).json({ error: "Enter the code on the big screen." });
+    }
+    const who = attendeeFor(body.session);
+    if (!who) {
+        return res.status(401).json({ error: "Sign in with Hack Club to share your screen.", signIn: true });
+    }
+    if (who.slack && isBanned(who.slack)) {
+        return res.status(403).json({ error: "Banned user" });
     }
     const token = getToken(code);
     if (!token || isBanned(token.slack)) {
@@ -937,36 +1179,41 @@ app.post("/demoJoin", async function (req, res) {
         return res.status(401).json({ error: "That's not the code on the big screen." });
     }
 
-    if (d.presenter) {
-        if (admitPresenter(d.presenter, { name }) !== "replace") {
-            return res.status(409).json({ error: `${d.presenter.name} is on the big screen right now.` });
-        }
-        endPresenter(code, "replaced");
+    // Already waiting or approved (a reload, a second tab): hand back the same place in line.
+    const existing = (d.presenter && d.presenter.who === who.id ? d.presenter : null) ||
+        d.queue.find(q => q.who === who.id);
+    if (existing) {
+        return res.status(200).json({ token: existing.token, iceServers });
+    }
+    if (d.queue.length >= DEMO_QUEUE_MAX) {
+        return res.status(409).json({ error: "The queue is full. Try again in a bit." });
     }
 
-    const presenter = {
+    const entry = {
         id: crypto.randomBytes(6).toString("hex"),
-        name,
+        who: who.id,
+        name: who.name,
+        slack: who.slack,
         token: crypto.randomBytes(32).toString("hex"),
         res: null,
-        timer: null
+        timer: null,
+        pickTimer: null,
+        picked: false
     };
-    presenter.timer = setTimeout(() => {
-        if (d.presenter === presenter) endPresenter(code, "timeout");
-    }, DEMO_PENDING_TTL);
-    d.presenter = presenter;
-    // A code is good for one presenter: the next person has to read the new one off the screen.
-    d.screenCode = newScreenCode();
+    // Dropped if their feed never connects.
+    entry.timer = setTimeout(() => dropQueued(code, entry, "lost"), DEMO_PENDING_TTL);
+    d.queue.push(entry);
     notifyDemo(code);
-    logAs(code, `${name} joined demo time`);
-    return res.status(200).json({ token: presenter.token, iceServers });
+    logAs(code, `${who.name} joined the demo queue`);
+    return res.status(200).json({ token: entry.token, iceServers });
 });
 
-// The presenter's feed: { type: "ready", restart } (start or redo the handshake),
-// { type: "signal", signal } and { type: "ended", reason }.
+// The presenter's feed, open from joining the queue until their turn ends:
+// { type: "queued", position }, { type: "approved" }, { type: "ready", restart } (start or
+// redo the handshake), { type: "signal", signal } and { type: "ended", reason }.
 app.get("/demoStream", async function (req, res) {
     const code = req.query.code != null ? String(req.query.code) : "";
-    const p = demoPresenter(code, req.query.token);
+    const p = demoPresenter(code, req.query.token) || demoQueued(code, req.query.token);
     if (!p) {
         return res.status(401).json({ error: "This screenshare has ended" });
     }
@@ -975,28 +1222,61 @@ app.get("/demoStream", async function (req, res) {
     p.res = res;
     if (stale) sseEnd(stale);
     clearTimeout(p.timer);
+    p.timer = null;
 
     openSSE(res);
-    if (d.screen) sseWrite(res, { type: "ready", restart: false });
+    if (d.presenter === p) {
+        sseWrite(res, { type: "approved" });
+        if (p.picked && d.screen) sseWrite(res, { type: "ready", restart: false });
+    }
     notifyDemo(code);
 
     res.on("close", () => {
         if (p.res !== res) return;
         p.res = null;
         const now = demos.get(code);
-        if (!now || now.presenter !== p) return;
-        // Wifi blips shouldn't end a demo: the video is peer-to-peer and may well still be playing.
-        p.timer = setTimeout(() => {
-            if (now.presenter === p && !p.res) endPresenter(code, "lost");
-        }, DEMO_GRACE);
+        if (!now) return;
+        // Wifi blips shouldn't cost anyone their turn or their place in line; for a live
+        // presenter the video is peer-to-peer and may well still be playing.
+        if (now.presenter === p) {
+            p.timer = setTimeout(() => {
+                if (now.presenter === p && !p.res) endPresenter(code, "lost");
+            }, DEMO_GRACE);
+        } else if (now.queue.includes(p)) {
+            p.timer = setTimeout(() => {
+                if (!p.res) dropQueued(code, p, "lost");
+            }, DEMO_GRACE);
+        } else {
+            return;
+        }
         notifyDemo(code);
     });
+});
+
+// The approved presenter has picked a window: start the handshake with the projector.
+app.post("/demoPicked", async function (req, res) {
+    const body = req.body || {};
+    const code = body.code != null ? String(body.code) : "";
+    const p = demoPresenter(code, body.token);
+    if (!p) return res.status(401).json({ error: "This screenshare has ended" });
+    const d = demos.get(code);
+    p.picked = true;
+    clearTimeout(p.pickTimer);
+    p.pickTimer = null;
+    if (p.res && d.screen) sseWrite(p.res, { type: "ready", restart: false });
+    notifyDemo(code);
+    return res.status(200).json({ ok: true });
 });
 
 app.post("/demoLeave", async function (req, res) {
     const body = req.body || {};
     const code = body.code != null ? String(body.code) : "";
-    if (demoPresenter(code, body.token)) endPresenter(code, "left");
+    if (demoPresenter(code, body.token)) {
+        endPresenter(code, "left");
+    } else {
+        const q = demoQueued(code, body.token);
+        if (q) dropQueued(code, q, "left");
+    }
     return res.status(200).json({ message: "Left" });
 });
 
@@ -1011,7 +1291,7 @@ app.post("/demoSignal", async function (req, res) {
     if (body.token != null) {
         const code = body.code != null ? String(body.code) : "";
         const p = demoPresenter(code, body.token);
-        if (!p) return res.status(401).json({ error: "This screenshare has ended" });
+        if (!p || !p.picked) return res.status(401).json({ error: "This screenshare has ended" });
         const d = demos.get(code);
         if (d.screen) sseWrite(d.screen, { type: "signal", from: p.id, signal: body.signal });
         return res.status(200).json({ delivered: !!d.screen });
@@ -1076,6 +1356,9 @@ app.post("/setEvents", async function (req, res) {
     }
 
     tokens = parsed;
+    for (const c of [...harpaOn]) {
+        if (!getToken(c)) harpaOn.delete(c);
+    }
     normalizeMerges();
     mergeRequests.clear();
     streamTickets.clear();
@@ -1105,6 +1388,7 @@ app.post("/banEvent", async function (req, res) {
         if (!banned.includes(targetSlack)) {
             banned.push(targetSlack);
         }
+        kickAttendee(targetSlack);
     };
 
     if (banSlack) {
@@ -1154,6 +1438,34 @@ async function getAdmins(req, res) {
 }
 app.route("/getAdmins").get(getAdmins).post(getAdmins);
 
+// --- Harpa (lo-fi music on the big screen) ---
+//
+// The big screen embeds https://harpa.hackclub.com when an organizer turns it on. Harpa keeps
+// its own settings (playlist, logo, MP3s) inside the embed on the projector; this server only
+// carries the on/off switch, as { type: "harpa", harpa } on /orgStream and /screenStream.
+
+function harpaState(code) {
+    return { enabled: harpaOn.has(code) };
+}
+
+app.post("/harpaSet", async function (req, res) {
+    const code = authOrganizer(req, res);
+    if (code == null) return;
+    const enabled = req.body && req.body.enabled;
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "Send enabled as true or false" });
+    if (harpaOn.has(code) !== enabled) {
+        if (enabled) harpaOn.add(code);
+        else harpaOn.delete(code);
+        const payload = { type: "harpa", harpa: harpaState(code) };
+        for (const s of orgStreams.get(code) || []) sseWrite(s, payload);
+        const d = demos.get(code);
+        if (d && d.screen) sseWrite(d.screen, payload);
+        logAs(code, `Turned harpa ${enabled ? "on" : "off"}`);
+    }
+    return res.status(200).json({ harpa: harpaState(code) });
+});
+
+// Keep this after every route: anything that reaches it is unknown.
 app.use(function (req, res) {
     res.status(404).json({ error: "Not found" });
 });
